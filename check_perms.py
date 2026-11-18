@@ -1,5 +1,6 @@
 import psycopg2
-conn = psycopg2.connect(host='localhost', port=5432, user='postgres', password='admin123', database='siga_local')
+from db_env import connect_db  # credenciales desde .env
+conn = connect_db()
 cur = conn.cursor()
 # Verificar permisos de secretaria_programa
 cur.execute("SELECT permission_id FROM core_role_permissions WHERE role_id = (SELECT id FROM core_roles WHERE name = 'secretaria_programa')")

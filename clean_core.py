@@ -1,12 +1,7 @@
 import psycopg2
+from db_env import connect_db  # credenciales desde .env
 
-conn = psycopg2.connect(
-    host='localhost',
-    port=5432,
-    user='postgres',
-    password='admin123',
-    database='siga_local'
-)
+conn = connect_db()
 cur = conn.cursor()
 
 tables_to_drop = [

@@ -1,5 +1,6 @@
 import psycopg2
-conn = psycopg2.connect(host='localhost', port=5432, user='postgres', password='admin123', database='siga_local')
+from db_env import connect_db  # credenciales desde .env
+conn = connect_db()
 conn.autocommit = True
 cur = conn.cursor()
 cur.execute("SELECT email, full_name, programa_ids FROM core_users WHERE email LIKE 'secretaria.%' OR email LIKE 'jefe.%' OR email LIKE 'docente.%' LIMIT 10;")

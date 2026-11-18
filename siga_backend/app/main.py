@@ -100,82 +100,80 @@ async def core_status():
     }
 
 # === ENDPOINTS DE AUTENTICACIÓN ===
+# Las credenciales viajan SIEMPRE en el body JSON: en la query string quedarian
+# registradas en logs de acceso, proxies e historial del navegador.
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    full_name: Optional[str] = None
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+async def _require_user(authorization: Optional[str], auth_service: AuthService) -> dict:
+    """Valida el header 'Authorization: Bearer <token>' y retorna el usuario."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Token requerido")
+    try:
+        scheme, token = authorization.split()
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Formato de autorización inválido")
+    if scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Esquema de autenticación inválido")
+    user = await auth_service.get_current_user(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Token inválido")
+    return user
+
+
 @app.post("/auth/register")
-async def register_user(email: str, password: str, full_name: str = None, 
-                       db: AsyncSession = Depends(get_identity_db)):
-    """Endpoint para registro de usuarios"""
+async def register_user(request: RegisterRequest,
+                        authorization: Optional[str] = Header(None),
+                        db: AsyncSession = Depends(get_identity_db)):
+    """Alta de usuarios: solo superadmin (no existe auto-registro público)."""
     auth_service = AuthService(db)
-    result = await auth_service.register_user(email, password, full_name)
-    
+    user = await _require_user(authorization, auth_service)
+    if "superadmin" not in (user.get("roles") or [user.get("role")]):
+        raise HTTPException(status_code=403, detail="Solo un superadmin puede registrar usuarios")
+
+    result = await auth_service.register_user(request.email, request.password, request.full_name)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["error"])
-    
     return {"message": "Usuario registrado exitosamente", "user": result["user"]}
 
 @app.post("/auth/login")
-async def login_user(email: str, password: str, db: AsyncSession = Depends(get_identity_db)):
+async def login_user(request: LoginRequest, db: AsyncSession = Depends(get_identity_db)):
     """Endpoint para login de usuarios"""
     auth_service = AuthService(db)
-    result = await auth_service.authenticate_user(email, password)
-    
+    result = await auth_service.authenticate_user(request.email, request.password)
     if not result:
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
-    
     return result
 
 @app.get("/auth/me")
 async def get_current_user_info(authorization: Optional[str] = Header(None),
                                db: AsyncSession = Depends(get_identity_db)):
     """Endpoint para obtener información del usuario actual"""
-    auth_service = AuthService(db)
-    
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Token requerido")
-    
-    # Extraer token del header "Bearer <token>"
-    try:
-        scheme, token = authorization.split()
-        if scheme.lower() != "bearer":
-            raise HTTPException(status_code=401, detail="Esquema de autenticación inválido")
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Formato de autorización inválido")
-    
-    user = await auth_service.get_current_user(token)
-    if not user:
-        raise HTTPException(status_code=401, detail="Token inválido")
-    
-    return user
-
-class ChangePasswordRequest(BaseModel):
-    old_password: str
-    new_password: str
+    return await _require_user(authorization, AuthService(db))
 
 @app.put("/auth/change-password")
-async def change_password(request: ChangePasswordRequest, 
+async def change_password(request: ChangePasswordRequest,
                          authorization: Optional[str] = Header(None),
                          db: AsyncSession = Depends(get_identity_db)):
     """Endpoint para cambiar contraseña"""
     auth_service = AuthService(db)
-    
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Token requerido")
-    
-    try:
-        scheme, token = authorization.split()
-        if scheme.lower() != "bearer":
-            raise HTTPException(status_code=401, detail="Esquema de autenticación inválido")
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Formato de autorización inválido")
-    
-    user = await auth_service.get_current_user(token)
-    if not user:
-        raise HTTPException(status_code=401, detail="Token inválido")
-    
+    user = await _require_user(authorization, auth_service)
+
     result = await auth_service.change_password(user["id"], request.old_password, request.new_password)
-    
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["error"])
-        
     return {"message": "Contraseña cambiada exitosamente"}
 
 # === GATEWAY HTTP - ROUTING DINÁMICO A MÓDULOS ===

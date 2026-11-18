@@ -601,6 +601,7 @@ Ejemplo: Cuando `mod-gestion-academica` registra un estudiante, publica `estudia
 | **Decisión** | **Login con credenciales en el cuerpo JSON** (`POST /auth/login` con `{"email","password"}`; sin credenciales en la URL). Las llamadas a módulos usan el Gateway (`/api/v1/{module}/...`); el acceso directo a `:8009` es una **excepción temporal** que se migra post-MVP. |
 | **Fundamento** | Las URLs quedan registradas en logs e historial; el body es la vía estándar y no se filtra. El contrato de login se corrige en el MVP (impacta a `apiClient.login()`). |
 | **Consecuencias** | + Menor fuga de credenciales; contrato estándar. - Requiere limpiar el soporte de query params en el Core y ajustar el cliente frontend. |
+| **Estado** | **Implementado (2026-11-17).** `POST /auth/login` y `POST /auth/register` aceptan solo body JSON (query params → 422). `/auth/register` requiere token de superadmin (no hay auto-registro público). Cubierto por `tests/test_auth_endpoints.py` y `src/test/auth_client.test.jsx`. |
 
 ### ADR-014: Catálogo Oficial de Programas (11)
 

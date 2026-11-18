@@ -334,19 +334,19 @@ def _validar_nota_vigesimal(valor) -> Optional[int]:
         return None
     if isinstance(valor, bool):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Las notas deben estar entre 0 y 20"
         )
     try:
         num = float(valor)
     except (ValueError, TypeError):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Las notas deben estar entre 0 y 20"
         )
     if num < 0 or num > 20:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Las notas deben estar entre 0 y 20"
         )
     return round(num)
@@ -424,7 +424,7 @@ async def guardar_registros_batch(items: List[dict], request: Request, db: Async
 
     if not pares_unidad_periodo:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="No se pudo determinar la unidad didáctica o periodo para los registros."
         )
 
@@ -958,7 +958,7 @@ async def actualizar_fecha_limite_carga(carga_id: int, data: FechaLimiteRequest,
     hoy = get_hoy_lima()
     if fecha_limite < hoy:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="La fecha límite debe ser igual o posterior a la fecha actual."
         )
 
@@ -1030,7 +1030,7 @@ async def actualizar_fecha_limite_masiva(programa_id: int, periodo_id: int, data
     hoy = get_hoy_lima()
     if fecha_limite < hoy:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="La fecha límite debe ser igual o posterior a la fecha actual."
         )
 
@@ -1263,14 +1263,14 @@ async def reabrir_acta_carga(carga_id: int, data: ReabrirActaRequest, request: R
 
     if not data.motivo or len(data.motivo.strip()) < 10:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="El motivo de reapertura es obligatorio y debe tener al menos 10 caracteres."
         )
 
     hoy = get_hoy_lima()
     if data.nueva_fecha_limite < hoy:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="La nueva fecha límite debe ser igual o posterior a la fecha actual."
         )
 

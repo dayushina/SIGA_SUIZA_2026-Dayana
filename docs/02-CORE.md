@@ -126,7 +126,7 @@ class CoreSettings(BaseSettings):
     # ──────────────────────────────────────────────
     APP_NAME: str = "SIGA Core"
     ENVIRONMENT: str = "development"  # development | staging | production
-    SECRET_KEY: str = "change-me-in-production"
+    SECRET_KEY: str = ""  # OBLIGATORIA (>=32 chars); el Core no arranca sin ella
     DEBUG: bool = False
 
     # ──────────────────────────────────────────────
@@ -1958,7 +1958,7 @@ if __name__ == "__main__":
 |-------|----------|---------|-------------|
 | **Core Identity** | `APP_NAME` | "SIGA Core" | Nombre de la aplicación |
 | | `ENVIRONMENT` | "development" | Entorno: development, staging, production |
-| | `SECRET_KEY` | "change-me-in-production" | Clave secreta para JWT (HS256) o ruta a clave privada RSA |
+| | `SECRET_KEY` | *(sin default, obligatoria)* | Clave secreta para JWT (HS256), mínimo 32 caracteres. Se valida al arrancar: vacía o insegura → el Core no inicia |
 | | `DEBUG` | False | Modo debug (reload automático, stack traces) |
 | **Database** | `DB_HOST` | "localhost" | Host de PostgreSQL |
 | | `DB_PORT` | 5432 | Puerto de PostgreSQL |

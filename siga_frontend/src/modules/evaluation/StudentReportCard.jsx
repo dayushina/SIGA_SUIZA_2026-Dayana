@@ -312,6 +312,20 @@ function BoletinEmptyState() {
   );
 }
 
+// Definido a nivel de modulo: crearlo dentro del render lo re-monta en cada render.
+const Membrete = () => (
+  <div className="text-center mb-7">
+    <div className="flex items-center justify-center gap-2.5 mb-1">
+      <span className="text-2xl">🎓</span>
+      <h1 className="text-2xl md:text-3xl font-extrabold text-primary tracking-wide">SIGA</h1>
+    </div>
+    <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.28em] mb-3">Sistema de Gestión Académica</p>
+    <div className="w-full h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent mb-3"></div>
+    <h2 className="text-sm font-bold text-slate-700 uppercase tracking-[0.2em]">Boletín de Notas Oficial</h2>
+    <div className="w-16 h-0.5 bg-primary mx-auto mt-2.5"></div>
+    <p className="text-[10px] text-slate-400 mt-2">Conforme al Reglamento de Evaluación y Promoción del Estudiante</p>
+  </div>
+);
 
 export function StudentReportCard() {
   const { user, openPasswordModal } = useAuth();
@@ -458,31 +472,8 @@ export function StudentReportCard() {
           console.warn('API /boletin no disponible o error:', err);
         }
 
-        const notasJson = obtenerNotasPorCiclo(effectiveStudentId, selectedStudent);
-        if (notasJson) {
-          const periodoActual = resumenDesdeJson(notasJson);
-          if (real) {
-            setData({
-              ...real,
-              estudiante: { ...real.estudiante, periodo_codigo: notasJson.periodoActual },
-              cursos_periodo: periodoActual.cursos_periodo,
-              resumen: { ...real.resumen, ...periodoActual.resumen },
-              _notasJson: notasJson,
-            });
-          } else {
-            const boletinJson = generarBoletinDesdeJson(effectiveStudentId, selectedStudent);
-            if (boletinJson) {
-              setData(boletinJson);
-            } else {
-              throw new Error('No se pudo generar la información del boletín.');
-            }
-          }
-        } else if (real) {
-          const evaluacion = mockEvaluacion.evaluaciones.find(
-            e => e.codigo_estudiante === real.estudiante.codigo_estudiante
-              && e.periodo === real.estudiante.periodo_codigo
-          );
-          setData(evaluacion ? { ...real, ...evaluacion } : real);
+        if (real) {
+          setData(real);
         } else {
           throw new Error('No se encontró información del boletín para este estudiante.');
         }
@@ -500,20 +491,7 @@ export function StudentReportCard() {
     setOrdenCursos('nombre');
   }, [data]);
 
-  const Membrete = () => (
-    <div className="text-center mb-7">
-      <div className="flex items-center justify-center gap-2.5 mb-1">
-        <span className="text-2xl">🎓</span>
-        <h1 className="text-2xl md:text-3xl font-extrabold text-primary tracking-wide">SIGA</h1>
-      </div>
-      <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.28em] mb-3">Sistema de Gestión Académica</p>
-      <div className="w-full h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent mb-3"></div>
-      <h2 className="text-sm font-bold text-slate-700 uppercase tracking-[0.2em]">Boletín de Notas Oficial</h2>
-      <div className="w-16 h-0.5 bg-primary mx-auto mt-2.5"></div>
-      <p className="text-[10px] text-slate-400 mt-2">Conforme al Reglamento de Evaluación y Promoción del Estudiante</p>
-    </div>
-  );
-
+  
   if (loading) {
     return (
       <div className="animate-fade-in max-w-4xl mx-auto">

@@ -46,7 +46,9 @@ class SIGAApiClient {
           try {
             const errorData = await response.json();
             errorMsg = errorData.detail || errorMsg;
-          } catch (_) {}
+          } catch {
+            // respuesta sin JSON: se mantiene el mensaje por defecto
+          }
           throw new Error(errorMsg);
         }
         this.clearToken();
@@ -76,8 +78,10 @@ class SIGAApiClient {
 
   // Auth endpoints
   async login(email, password) {
-    return this.request(`/auth/login?email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`, {
-      method: 'POST'
+    // Credenciales en el body: nunca en la URL (quedarian en logs/historial)
+    return this.request('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password })
     });
   }
 
@@ -86,8 +90,9 @@ class SIGAApiClient {
   }
 
   async register(email, password, fullName) {
-    return this.request(`/auth/register?email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}&full_name=${encodeURIComponent(fullName)}`, {
-      method: 'POST'
+    return this.request('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, full_name: fullName })
     });
   }
 

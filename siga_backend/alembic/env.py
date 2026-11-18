@@ -17,10 +17,12 @@ config = context.config
 db_url = os.getenv("DB_URL")
 if not db_url:
     user = os.getenv("DB_USER", "postgres")
-    password = os.getenv("DB_PASSWORD", "john.007")
+    password = os.environ.get("DB_PASSWORD")
+    if not password:
+        raise RuntimeError("DB_PASSWORD (o DB_URL) es obligatorio para ejecutar migraciones")
     host = os.getenv("DB_HOST", "host.docker.internal")
     port = os.getenv("DB_PORT", "5432")
-    dbname = os.getenv("DB_NAME", "siga_core")
+    dbname = os.getenv("DB_NAME", "siga_local")
     db_url = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{dbname}"
     config.set_main_option("sqlalchemy.url", db_url)
 else:

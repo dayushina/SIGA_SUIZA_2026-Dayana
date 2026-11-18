@@ -19,10 +19,6 @@ export function UserManagement() {
   });
   const [editingId, setEditingId] = useState(null);
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
   const loadData = async () => {
     setLoading(true);
     try {
@@ -74,6 +70,10 @@ export function UserManagement() {
     setEditingId(user.id);
     setShowModal(true);
   };
+
+  useEffect(() => {
+    loadData();
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();

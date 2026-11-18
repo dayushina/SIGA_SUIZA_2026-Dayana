@@ -8,6 +8,22 @@ import { SectionInfoBlock } from './SectionInfoBlock';
 import { getDefaultPeriod, getPeriodLabel, getPeriodLabelById, isHistoricalPeriod, isFirstPeriodOfYear } from './periodUtils';
 import './enrollmentPremium.css';
 
+// Definido a nivel de modulo: crearlo dentro del render lo re-monta en cada render.
+const Badge = ({ children, tone = 'slate' }) => {
+  const tones = {
+    green: 'bg-green-100 text-green-700 border-green-200',
+    red: 'bg-red-100 text-red-700 border-red-200',
+    amber: 'bg-amber-100 text-amber-700 border-amber-200',
+    sky: 'bg-sky-100 text-sky-700 border-sky-200',
+    slate: 'bg-slate-100 text-slate-600 border-slate-200',
+  };
+  return (
+    <span className={`inline-block px-2.5 py-1 rounded-full text-[11px] font-bold border ${tones[tone]}`}>
+      {children}
+    </span>
+  );
+};
+
 /**
  * Sección 1 del diagrama — Admisión.
  *
@@ -116,21 +132,7 @@ export function AdmissionPanel() {
     }
   };
 
-  const Badge = ({ children, tone = 'slate' }) => {
-    const tones = {
-      green: 'bg-green-100 text-green-700 border-green-200',
-      red: 'bg-red-100 text-red-700 border-red-200',
-      amber: 'bg-amber-100 text-amber-700 border-amber-200',
-      sky: 'bg-sky-100 text-sky-700 border-sky-200',
-      slate: 'bg-slate-100 text-slate-600 border-slate-200',
-    };
-    return (
-      <span className={`inline-block px-2.5 py-1 rounded-full text-[11px] font-bold border ${tones[tone]}`}>
-        {children}
-      </span>
-    );
-  };
-
+  
   return (
     <div className="animate-fade-in space-y-6">
       {/* Encabezado */}

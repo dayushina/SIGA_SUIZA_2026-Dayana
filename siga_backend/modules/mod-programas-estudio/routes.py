@@ -558,13 +558,13 @@ async def crear_carga_lectiva(programa_id: int, carga: CargaLectivaCreate, reque
     doc_rows = doc_res.fetchall()
     if not doc_rows or not any(row[0] for row in doc_rows):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="El docente indicado no existe o no se encuentra activo en el sistema"
         )
     roles_doc = {row[1].lower().strip() for row in doc_rows if row[1]}
     if not (roles_doc.intersection({"docente", "coordinador_programa"})):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="El usuario asignado debe poseer rol docente o coordinador_programa"
         )
 
@@ -876,13 +876,13 @@ async def actualizar_carga_lectiva(
             doc_rows = doc_res.fetchall()
             if not doc_rows or not any(row[0] for row in doc_rows):
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail="El docente indicado no existe o no se encuentra activo en el sistema"
                 )
             roles_doc = {row[1].lower().strip() for row in doc_rows if row[1]}
             if not (roles_doc.intersection({"docente", "coordinador_programa"})):
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail="El usuario asignado debe poseer rol docente o coordinador_programa"
                 )
 
@@ -909,7 +909,7 @@ async def actualizar_carga_lectiva(
     if "fecha_limite_notas" in update_data and update_data["fecha_limite_notas"] is not None:
         if update_data["fecha_limite_notas"] < date.today():
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="La fecha límite no puede ser anterior a la fecha actual"
             )
 
@@ -917,7 +917,7 @@ async def actualizar_carga_lectiva(
     if "estado" in update_data and update_data["estado"] is not None:
         if update_data["estado"] not in ("borrador", "revision", "publicado"):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Estado inválido para la carga lectiva. Valores permitidos: borrador, revision, publicado"
             )
 
@@ -1057,7 +1057,7 @@ async def actualizar_horario(
     if "estado" in update_data and update_data["estado"] is not None:
         if update_data["estado"] not in ("borrador", "revision", "publicado"):
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Estado inválido para el horario. Valores permitidos: borrador, revision, publicado"
             )
 

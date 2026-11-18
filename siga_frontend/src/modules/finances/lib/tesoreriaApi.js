@@ -12,11 +12,11 @@ async function request(path, { method = 'GET', body } = {}) {
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  let data = null;
+  let data;
   try {
     data = await res.json();
   } catch {
-    data = null;
+    data = null; // respuesta sin cuerpo JSON
   }
   if (!res.ok) {
     const detail = typeof data?.detail === 'string' ? data.detail : null;

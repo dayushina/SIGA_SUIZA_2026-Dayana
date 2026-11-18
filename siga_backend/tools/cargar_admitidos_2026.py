@@ -8,6 +8,7 @@ Carga idempotente de los admitidos 2026 (438) desde admision_resultados.xlsx.
 
 Uso:  python siga_backend/tools/cargar_admitidos_2026.py [--dry-run]
 """
+import os
 import sys
 import json
 import math
@@ -19,7 +20,7 @@ import pandas as pd
 
 API = "http://localhost:8000"
 EMAIL = "admin@siga.edu"
-PASSWORD = "admin123"
+PASSWORD = os.environ.get("SIGA_ADMIN_PASSWORD", "")  # definir antes de ejecutar
 EXCEL = Path(__file__).resolve().parents[2] / "admision_resultados.xlsx"
 REPORTE = Path(__file__).resolve().parents[2] / "siga_backend" / "tools" / "reporte_carga_admitidos_2026.csv"
 
@@ -79,7 +80,7 @@ def digitos(valor):
 
 
 def login(client):
-    r = client.post("/auth/login", params={"email": EMAIL, "password": PASSWORD})
+    r = client.post("/auth/login", json={"email": EMAIL, "password": PASSWORD})
     r.raise_for_status()
     return r.json()["access_token"]
 

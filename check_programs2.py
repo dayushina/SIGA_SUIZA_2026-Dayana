@@ -1,5 +1,6 @@
 import psycopg2
-conn = psycopg2.connect(host='localhost', port=5432, user='postgres', password='admin123', database='siga_local')
+from db_env import connect_db  # credenciales desde .env
+conn = connect_db()
 conn.autocommit = True
 cur = conn.cursor()
 

@@ -11,6 +11,17 @@ import {
   Users, AlertCircle, Info, Sparkles, DollarSign, Activity
 } from 'lucide-react';
 
+// Edad exacta en años cumplidos (considera si ya pasó el cumpleaños este año).
+function formatearEdad(fechaNacimiento, hoy = new Date()) {
+  if (!fechaNacimiento) return null;
+  const nac = new Date(`${String(fechaNacimiento).slice(0, 10)}T00:00:00`);
+  if (isNaN(nac.getTime())) return null;
+  let edad = hoy.getFullYear() - nac.getFullYear();
+  const mes = hoy.getMonth() - nac.getMonth();
+  if (mes < 0 || (mes === 0 && hoy.getDate() < nac.getDate())) edad--;
+  return edad > 0 ? `${edad} años` : null;
+}
+
 const PROGRAMAS = {
   1: 'Administración de Operaciones Turísticas',
   2: 'Asistencia Administrativa',
@@ -203,12 +214,7 @@ export function StudentDetail({ student, onClose }) {
     ? new Date(s.fecha_nacimiento + 'T00:00:00').toLocaleDateString('es-PE', { day: '2-digit', month: 'long', year: 'numeric' })
     : null;
 
-  const edad = s.fecha_nacimiento ? (() => {
-    const diff = Date.now() - new Date(s.fecha_nacimiento).getTime();
-    const ageDate = new Date(diff);
-    const calculatedAge = Math.abs(ageDate.getUTCFullYear() - 1970);
-    return !isNaN(calculatedAge) && calculatedAge > 0 ? `${calculatedAge} años` : null;
-  })() : null;
+  const edad = formatearEdad(s.fecha_nacimiento);
 
   const meta = s.metadata_admision || {};
 

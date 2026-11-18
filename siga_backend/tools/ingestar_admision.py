@@ -10,7 +10,7 @@ def login():
     # O usar superadmin
     response = requests.post(
         f"{API_URL}/auth/login",
-        params={"email": "admin@siga.edu", "password": "admin123"}
+        json={"email": os.environ.get("SIGA_ADMIN_EMAIL", "admin@siga.edu"), "password": os.environ["SIGA_ADMIN_PASSWORD"]}
     )
     if not response.ok:
         print("Fallo el login:", response.text)

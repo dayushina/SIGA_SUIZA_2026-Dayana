@@ -2,11 +2,10 @@ import psycopg2
 from psycopg2 import sql
 import os
 
-DB_HOST = os.getenv('DB_HOST', 'localhost')
-DB_PORT = os.getenv('DB_PORT', '5432')
-DB_USER = os.getenv('DB_USER', 'postgres')
-DB_PASSWORD = os.getenv('DB_PASSWORD', 'admin123')
-DB_NAME = os.getenv('DB_NAME', 'siga_local')
+from db_env import db_params  # credenciales desde .env
+
+_p = db_params()
+DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME = _p['host'], _p['port'], _p['user'], _p['password'], _p['dbname']
 
 print("=== SIGA: Reset y Siembra de Base de Datos ===")
 print(f"Conectando a {DB_USER}@{DB_HOST}:{DB_PORT}/{DB_NAME}...")

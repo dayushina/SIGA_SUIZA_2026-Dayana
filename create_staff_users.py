@@ -1,13 +1,8 @@
 import psycopg2
 import bcrypt
+from db_env import connect_db  # credenciales desde .env
 
-conn = psycopg2.connect(
-    host='localhost',
-    port=5432,
-    user='postgres',
-    password='admin123',
-    database='siga_local'
-)
+conn = connect_db()
 conn.autocommit = True
 cur = conn.cursor()
 

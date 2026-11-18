@@ -8,9 +8,8 @@ API_URL = "http://localhost:8000"
 def login():
     print("Iniciando sesion como superadmin...")
     response = requests.post(
-        f"{API_URL}/api/core/auth/login",
-        data={"username": "admin@siga.edu", "password": "admin123"},
-        headers={"Content-Type": "application/x-www-form-urlencoded"}
+        f"{API_URL}/auth/login",
+        json={"email": os.environ.get("SIGA_ADMIN_EMAIL", "admin@siga.edu"), "password": os.environ["SIGA_ADMIN_PASSWORD"]}
     )
     if not response.ok:
         print("Fallo el login:", response.text)

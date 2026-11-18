@@ -1,6 +1,10 @@
 from pydantic_settings import BaseSettings
 from typing import List, Optional
-from pydantic import Field
+from pydantic import Field, model_validator
+
+# Valores que jamas deben usarse para firmar JWT (son publicos en el repositorio).
+INSECURE_SECRET_KEYS = {"", "change-me-in-production"}
+MIN_SECRET_KEY_LENGTH = 32
 
 class CoreSettings(BaseSettings):
     """Configuración centralizada del Core con resiliencia"""
@@ -8,15 +12,16 @@ class CoreSettings(BaseSettings):
     # Core Identity
     app_name: str = "SIGA Core"
     environment: str = "development"
-    secret_key: str = "change-me-in-production"
+    # Obligatoria: se lee de la variable de entorno SECRET_KEY (ver .env.example).
+    secret_key: str = ""
     debug: bool = True
     
     # Database (Solo para Identity del Core)
     DB_HOST: str = "localhost"
     DB_PORT: int = 5432
     DB_USER: str = "postgres"
-    DB_PASSWORD: str = "dariana"
-    DB_NAME: str = "siga_suiza_2026"
+    DB_PASSWORD: str = ""
+    DB_NAME: str = "siga_local"
     DATABASE_URL: Optional[str] = None
     
     # Module Registry
@@ -56,6 +61,15 @@ class CoreSettings(BaseSettings):
     circuit_breaker_failure_threshold: int = Field(default=5, description="Umbral de fallos para abrir circuito")
     circuit_breaker_recovery_timeout: int = Field(default=60, description="Tiempo de recuperación en segundos")
     
+    @model_validator(mode="after")
+    def _validar_secret_key(self):
+        if self.secret_key in INSECURE_SECRET_KEYS or len(self.secret_key) < MIN_SECRET_KEY_LENGTH:
+            raise ValueError(
+                "SECRET_KEY no definida o insegura (minimo 32 caracteres). Generala con: "
+                "python -c \"import secrets; print(secrets.token_urlsafe(48))\" y definela en .env"
+            )
+        return self
+
     @property
     def database_url(self) -> str:
         if self.DATABASE_URL:

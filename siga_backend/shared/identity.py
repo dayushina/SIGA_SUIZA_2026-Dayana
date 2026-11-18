@@ -24,16 +24,21 @@ class Identity:
 
 
 def _get_secret_key() -> str:
+    """Clave HS256 compartida con el Core. Sin valor por defecto: nunca firmar/validar con una clave publica."""
     key = os.environ.get("SECRET_KEY")
-    if key:
-        return key
-    try:
-        from app.core.config import settings
-        if settings.secret_key:
-            return settings.secret_key
-    except Exception:
-        pass
-    return "change-me-in-production"
+    if not key:
+        try:
+            from app.core.config import settings
+            key = settings.secret_key
+        except Exception:
+            key = None
+    if not key or key == "change-me-in-production":
+        logger.error("SECRET_KEY no configurada: se rechazan todos los tokens internos.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Servicio mal configurado"
+        )
+    return key
 
 
 async def get_identity(request: Request, db: AsyncSession) -> Identity:
