@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 
 export function DashboardLayout({ children, currentView, onNavigate }) {
-  const { user, logout, permissions, openPasswordModal } = useAuth();
+  const { user, logout, openPasswordModal } = useAuth();
   const [notifications, setNotifications] = useState([]);
   const [wsStatus, setWsStatus] = useState(wsClient.connected ? 'connected' : 'disconnected');
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
@@ -131,17 +131,6 @@ export function DashboardLayout({ children, currentView, onNavigate }) {
             </div>
 
             <div className="flex items-center gap-3">
-              {/* Botón directo de cambio de contraseña */}
-              <button
-                type="button"
-                onClick={openPasswordModal}
-                className="hidden md:inline-flex items-center gap-2 px-3.5 py-2 rounded-xl border border-slate-200 bg-white/70 hover:bg-white text-navy hover:text-primary text-xs font-semibold shadow-xs transition-all cursor-pointer"
-                title="Configuración de seguridad y cambio de clave"
-              >
-                <KeyRound size={15} className="text-primary" />
-                <span>Cambiar Contraseña</span>
-              </button>
-
               {/* Menú de Configuración y Perfil de Usuario */}
               <div className="relative" ref={profileMenuRef}>
                 <button
@@ -267,7 +256,7 @@ export function DashboardLayout({ children, currentView, onNavigate }) {
                 </button>
               </div>
 
-              <div className="flex flex-col space-y-1.5 mb-8">
+              <div className="flex flex-col space-y-1.5">
                 {['superadmin', 'admin'].some(r => userRoles.includes(r)) && (
                   <NavItem
                     active={currentView === 'dashboard'}
@@ -356,36 +345,6 @@ export function DashboardLayout({ children, currentView, onNavigate }) {
                     label="Administración"
                   />
                 )}
-
-                {/* Menú de Configuración para Todos los Roles */}
-                <div className="pt-3 mt-3 border-t border-slate-200/60">
-                  <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-2 px-3">
-                    Configuración
-                  </span>
-                  <NavItem
-                    active={false}
-                    onClick={openPasswordModal}
-                    icon={KeyRound}
-                    label="Cambiar Contraseña"
-                  />
-                </div>
-              </div>
-
-              <div className="mt-auto pt-6 border-t border-slate-200/50">
-                <span className="text-xs font-bold text-slate-500 block mb-3 uppercase tracking-wider">Tus Capacidades</span>
-                <div className="flex flex-wrap gap-1.5">
-                  {permissions.map(permission => (
-                    <span
-                      key={permission}
-                      className="badge-blue px-2 py-0.5 text-[10px] font-semibold"
-                    >
-                      {permission}
-                    </span>
-                  ))}
-                  {permissions.length === 0 && (
-                    <span className="text-xs text-slate-400">Sin capacidades asignadas</span>
-                  )}
-                </div>
               </div>
             </div>
           </div>

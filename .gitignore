@@ -73,3 +73,8 @@ dump_*.sql
 # Cualquier volcado SQL en la raiz (p.ej. siga_railway.sql): contiene datos reales
 /*.sql
 backups/
+
+# Notas locales con credenciales de despliegue (NUNCA versionar)
+VARIABLES DE ENTORNO*.txt
+*credenciales*.txt
+*secrets*.txt
