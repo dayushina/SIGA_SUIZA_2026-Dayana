@@ -48,6 +48,12 @@ if [ -n "$DATABASE_URL" ]; then
     export DB_URL="$DATABASE_URL"
 fi
 
+# Snapshot de la BD versionado (bootstrap/seed): en una BD vacia restaura TODOS
+# los datos antes de las migraciones; despues produccion es la fuente de verdad.
+# Espera a que Postgres acepte conexiones (primer despliegue). Ver bootstrap/restore_seed.py.
+echo "🗄️ Verificando snapshot de la base de datos (SIGA_SEED_MODE=${SIGA_SEED_MODE:-auto})..."
+python -m bootstrap.restore_seed || fail "no se pudo preparar la base de datos (ver el mensaje [seed] ERROR de arriba)."
+
 if [ "$SKIP_MIGRATIONS" != "true" ]; then
     echo "🔄 Ejecutando migraciones de base de datos..."
     alembic upgrade head || fail "alembic upgrade head fallo (revisa el error de arriba: conexion a la BD o migracion invalida)."

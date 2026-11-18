@@ -137,20 +137,50 @@ def test_script_falla_sin_base_de_datos():
     assert "DATABASE_URL" in r.stderr
 
 
-@pytest.mark.skipif(SH is None, reason="requiere un shell POSIX (sh)")
-def test_script_falla_si_las_migraciones_fallan(tmp_path):
-    # alembic falso que siempre falla: el script debe abortar (antes seguia de largo)
-    fake = tmp_path / "alembic"
-    fake.write_text("#!/bin/sh\necho 'conexion rechazada' >&2\nexit 1\n", encoding="utf-8")
+def _fake_bin(tmp_path, name, exit_code, marker):
+    """Ejecutable falso en el PATH: registra que se llamo y sale con exit_code."""
+    fake = tmp_path / name
+    fake.write_text(f"#!/bin/sh\necho '{marker}' >> '{(tmp_path / 'calls.log').as_posix()}'\n"
+                    f"echo '{marker} fallo' >&2\nexit {exit_code}\n", encoding="utf-8")
     fake.chmod(0o755)
-    r = _run_start_script({
+
+
+def _calls(tmp_path):
+    log = tmp_path / "calls.log"
+    return log.read_text().split() if log.exists() else []
+
+
+def _run_with_fakes(tmp_path):
+    return _run_start_script({
         "SECRET_KEY": "x" * 48,
         "DATABASE_URL": "postgresql://u:p@127.0.0.1:1/db",
         "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}",
     })
+
+
+@pytest.mark.skipif(SH is None, reason="requiere un shell POSIX (sh)")
+def test_script_falla_si_las_migraciones_fallan(tmp_path):
+    # La preparacion de la BD (python -m bootstrap.restore_seed) va bien; alembic falla:
+    # el script debe abortar (antes seguia de largo).
+    _fake_bin(tmp_path, "python", 0, "python")
+    _fake_bin(tmp_path, "alembic", 1, "alembic")
+    r = _run_with_fakes(tmp_path)
     assert r.returncode == 1
     assert "alembic upgrade head fallo" in r.stderr
     assert "Iniciando Core Gateway" not in r.stdout
+    assert _calls(tmp_path) == ["python", "alembic"]  # el snapshot va ANTES de las migraciones
+
+
+@pytest.mark.skipif(SH is None, reason="requiere un shell POSIX (sh)")
+def test_script_falla_si_no_puede_preparar_la_bd(tmp_path):
+    # Si la restauracion del snapshot falla, no se migra ni se arranca nada.
+    _fake_bin(tmp_path, "python", 1, "python")
+    _fake_bin(tmp_path, "alembic", 0, "alembic")
+    r = _run_with_fakes(tmp_path)
+    assert r.returncode == 1
+    assert "no se pudo preparar la base de datos" in r.stderr
+    assert "Iniciando Core Gateway" not in r.stdout
+    assert _calls(tmp_path) == ["python"]
 
 
 # ---------------------------------------------------------------------------

@@ -7,3 +7,6 @@
 # Force CRLF for Windows-specific files (if any)
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# Snapshot cifrado de la BD: binario opaco (sin diffs ni conversion de EOL)
+*.enc binary
