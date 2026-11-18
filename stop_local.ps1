@@ -16,7 +16,10 @@ foreach ($p in Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Nam
     if ($cmd -notlike "*$root*") { continue }
     foreach ($pat in $patrones) {
         if ($cmd -like "*$pat*") {
-            Stop-Process -Id $p.ProcessId -Force
+            # /T: con --reload uvicorn sirve desde un proceso hijo (multiprocessing.spawn)
+            # que no contiene la ruta del proyecto; matar solo al padre lo dejaba huerfano
+            # y escuchando en el puerto.
+            & taskkill.exe /PID $p.ProcessId /T /F 2>$null | Out-Null
             Write-Host "  detenido PID $($p.ProcessId)  ($pat)" -ForegroundColor DarkGray
             $muertos++
             break
@@ -30,3 +33,6 @@ if ($muertos -gt 0) {
 } else {
     Write-Host " No habia procesos de SIGA corriendo." -ForegroundColor Yellow
 }
+
+# taskkill devuelve 128 si un hijo ya cayo con su padre: no es un error.
+exit 0

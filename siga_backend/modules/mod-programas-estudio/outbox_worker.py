@@ -14,10 +14,12 @@ except ImportError:
 import os
 
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
+# ENABLE_NATS=false (p.ej. Railway, sin broker): no intentar conectar.
+NATS_ENABLED = os.getenv("ENABLE_NATS", "true").strip().lower() not in ("false", "0", "no", "off")
 
 async def outbox_worker():
     nc = None
-    if NATS_AVAILABLE:
+    if NATS_AVAILABLE and NATS_ENABLED:
         nc = NATS()
         try:
             await nc.connect(NATS_URL)

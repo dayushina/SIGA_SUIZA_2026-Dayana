@@ -6,6 +6,8 @@ from database import AsyncSessionLocal
 from models import AuditLog
 
 NATS_URL = os.getenv("NATS_URL", "nats://localhost:4222")
+# ENABLE_NATS=false (p.ej. Railway, sin broker): no intentar conectar.
+NATS_ENABLED = os.getenv("ENABLE_NATS", "true").strip().lower() not in ("false", "0", "no", "off")
 
 async def process_audit_event(msg):
     try:
@@ -36,6 +38,9 @@ async def process_audit_event(msg):
         print(f"[AUDITORIA] Error procesando evento: {e}")
 
 async def start_listener():
+    if not NATS_ENABLED:
+        print("[AUDITORIA] NATS deshabilitado (ENABLE_NATS=false): listener inactivo.")
+        return
     nc = NATS()
     try:
         await nc.connect(NATS_URL)

@@ -2,7 +2,7 @@ from typing import List, Dict, Type
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .base_seeder import BaseSeeder
+from .base_seeder import BaseSeeder, SeederFatalError
 from .role_seeder import RoleSeeder
 from .user_seeder import UserSeeder
 from .permission_seeder import PermissionSeeder
@@ -53,6 +53,8 @@ class SeederRunner:
                         await seeder.run()
                         self.executed_seeders.append(seeder_name)
                         executed_this_round += 1
+                    except SeederFatalError:
+                        raise
                     except Exception as e:
                         logger.error(f"❌ Error en seeder {seeder_name}: {e}")
                         # Continuar con otros seeders

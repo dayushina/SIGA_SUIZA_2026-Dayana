@@ -4,6 +4,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+class SeederFatalError(RuntimeError):
+    """Error de configuracion que debe impedir el arranque (el runner no lo silencia)."""
+
 class BaseSeeder(ABC):
     """Clase base abstracta para todos los seeders"""
     
