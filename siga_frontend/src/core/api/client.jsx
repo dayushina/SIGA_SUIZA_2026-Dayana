@@ -1,5 +1,16 @@
-export const API_BASE = import.meta.env.VITE_API_URL || '';
-export const WS_BASE = import.meta.env.VITE_WS_URL || `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
+// Sin barra final: los endpoints empiezan con "/" (evita "//api/...").
+export const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+// WebSocket: mismo servidor que la API. En produccion (Vercel) el frontend y el
+// backend estan en dominios distintos, asi que se deriva de VITE_API_URL
+// (https -> wss). En desarrollo (API relativa) se usa el host actual + proxy de Vite.
+export function resolveWsBase(apiBase = API_BASE, explicit = import.meta.env.VITE_WS_URL, loc = window.location) {
+  if (explicit) return explicit.replace(/\/+$/, '');
+  if (/^https?:\/\//i.test(apiBase || '')) {
+    return apiBase.replace(/^http/i, 'ws').replace(/\/+$/, '');
+  }
+  return `${loc.protocol === 'https:' ? 'wss' : 'ws'}://${loc.host}`;
+}
+export const WS_BASE = resolveWsBase();
 
 class SIGAApiClient {
   constructor() {
@@ -128,52 +139,86 @@ export class SIGAWSClient {
     this.listeners = {};
     this.connected = false;
     this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 5;
+    this.reconnectTimer = null;
+    this.heartbeat = null;
+    this.intentionalDisconnect = false;
+    this._wake = () => { if (!this.connected && !this.intentionalDisconnect) this.reconnectNow(); };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', this._wake);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) this._wake(); });
+    }
   }
 
   connect() {
-    if (this.ws && this.connected) {
-      setTimeout(() => this.trigger('connected'), 0);
+    this.intentionalDisconnect = false;
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      if (this.connected) setTimeout(() => this.trigger('connected'), 0);
       return;
     }
 
-    this.ws = new WebSocket(`${WS_BASE}/ws`);
+    let ws;
+    try {
+      ws = new WebSocket(`${WS_BASE}/ws`);
+    } catch (error) {
+      console.error('❌ WebSocket URL invalida:', error);
+      this.scheduleReconnect();
+      return;
+    }
+    this.ws = ws;
 
-    this.ws.onopen = () => {
-      console.log('✅ WebSocket connected');
+    ws.onopen = () => {
       this.connected = true;
       this.reconnectAttempts = 0;
       this.trigger('connected');
+      // Latido: los proxies (Railway, Vercel, redes moviles) cortan conexiones inactivas.
+      clearInterval(this.heartbeat);
+      this.heartbeat = setInterval(() => this.send('ping'), 25000);
     };
 
-    this.ws.onmessage = (event) => {
-      console.log('📨 WS Message:', event.data);
+    ws.onmessage = (event) => {
+      if (event.data === 'pong') return;
       this.trigger('message', event.data);
     };
 
-    this.ws.onclose = () => {
-      console.log('🔌 WebSocket disconnected');
+    ws.onclose = () => {
+      if (this.ws !== ws) return; // conexion antigua ya reemplazada
+      clearInterval(this.heartbeat);
+      this.ws = null;
+      const wasConnected = this.connected;
       this.connected = false;
-      this.trigger('disconnected');
-      
-      // Auto reconnect (if not intentionally closed)
-      if (!this.intentionalDisconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
-        this.reconnectAttempts++;
-        setTimeout(() => this.connect(), 2000 * this.reconnectAttempts);
-      }
-      this.intentionalDisconnect = false;
+      if (wasConnected || this.reconnectAttempts === 0) this.trigger('disconnected');
+      if (!this.intentionalDisconnect) this.scheduleReconnect();
     };
-    
-    this.ws.onerror = (error) => {
-      console.error('❌ WebSocket error:', error);
+
+    ws.onerror = () => {
+      // onclose se dispara a continuacion y gestiona la reconexion
     };
   }
 
+  // Reintento indefinido con espera creciente (1s, 2s, 4s ... maximo 30s).
+  scheduleReconnect() {
+    clearTimeout(this.reconnectTimer);
+    const delay = Math.min(30000, 1000 * 2 ** this.reconnectAttempts);
+    this.reconnectAttempts += 1;
+    this.reconnectTimer = setTimeout(() => this.connect(), delay);
+  }
+
+  reconnectNow() {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectAttempts = 0;
+    this.connect();
+  }
+
   disconnect() {
+    this.intentionalDisconnect = true;
+    clearTimeout(this.reconnectTimer);
+    clearInterval(this.heartbeat);
     if (this.ws) {
-      this.intentionalDisconnect = true;
-      this.ws.close();
+      const ws = this.ws;
       this.ws = null;
+      this.connected = false;
+      ws.close();
+      this.trigger('disconnected');
     }
   }
 
