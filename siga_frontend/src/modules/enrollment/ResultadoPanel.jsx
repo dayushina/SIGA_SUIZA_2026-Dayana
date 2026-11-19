@@ -238,7 +238,7 @@ export function ResultadoPanel() {
                             {consolidando === m.matricula_id ? 'Consolidando...' : 'Consolidar'}
                           </button>
                         )}
-                        {!m.consolidada && bajas.puedeDesmatricular && (
+                        {bajas.puedeDesmatricular && (
                           <button
                             onClick={() => desmatricular(m)}
                             disabled={bajas.desmatriculando(m.matricula_id)}

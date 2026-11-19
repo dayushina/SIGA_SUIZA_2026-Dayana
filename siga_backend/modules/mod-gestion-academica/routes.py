@@ -919,10 +919,9 @@ async def _desmatricular(matricula_id: int, motivo: str, request: Request, db: A
         raise HTTPException(status_code=404, detail="Matrícula no encontrada")
     if db_matricula.estado_matricula in EstadoMatricula.anuladas():
         raise HTTPException(status_code=409, detail="La matrícula ya está anulada.")
-    if db_matricula.consolidada:
-        raise HTTPException(status_code=409, detail=(
-            "La matrícula ya tiene resultado final consolidado; no puede anularse. "
-            "Registre un retiro o reserva en el historial académico."))
+    # "consolidada" solo marca el cierre del tramite (registro academico + boleta QR):
+    # el asistente lo hace siempre al final, asi que NO impide anular. El limite
+    # academico real es tener notas registradas.
     con_notas = 0
     if await _tabla_existe(db, "evaluacion_registros"):
         con_notas = (await db.execute(text("""

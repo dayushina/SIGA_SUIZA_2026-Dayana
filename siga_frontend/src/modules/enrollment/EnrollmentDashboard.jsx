@@ -292,7 +292,7 @@ export function EnrollmentDashboard() {
                         >
                           Matricular
                         </button>
-                        {bajas.puedeDesmatricular && student.matricula_vigente && !student.matricula_vigente.consolidada && (
+                        {bajas.puedeDesmatricular && student.matricula_vigente && (
                           <button
                             className="px-4 py-1.5 text-sm font-semibold text-red-700 bg-red-50 hover:bg-red-600 hover:text-white border border-red-200 rounded-lg transition-colors disabled:opacity-50"
                             disabled={bajas.desmatriculando(student.matricula_vigente.id)}

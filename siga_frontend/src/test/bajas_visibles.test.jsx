@@ -9,7 +9,7 @@ vi.mock('../core/auth/useAuth', () => ({ useAuth: () => ({ user: mockUser }) }))
 
 const estudiante = { id: 7, nombres: 'Ana', apellidos: 'Prueba', dni: '12345678', codigo_estudiante: '2026-000007', programa_id: 1 };
 const matriculas = [
-  { id: 70, estudiante_id: 7, programa_id: 1, periodo_id: 1, tipo_ingreso: 'Ordinario', estado_matricula: 'confirmada', consolidada: false, detalles: [] },
+  { id: 70, estudiante_id: 7, programa_id: 1, periodo_id: 1, tipo_ingreso: 'Ordinario', estado_matricula: 'confirmada', consolidada: true, registro_academico: 'RA-1-00070', detalles: [] },
   { id: 69, estudiante_id: 7, programa_id: 1, periodo_id: 1, tipo_ingreso: 'Ordinario', estado_matricula: 'anulada', anulada_motivo: 'error', detalles: [] },
 ];
 

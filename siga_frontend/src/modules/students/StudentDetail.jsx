@@ -627,7 +627,7 @@ export function StudentDetail({ student, onClose, onChanged }) {
                               </td>
                               {bajas.puedeDesmatricular && (
                                 <td className="py-3 px-4 text-right">
-                                  {!ESTADOS_ANULADOS.includes(m.estado_matricula) && !m.consolidada ? (
+                                  {!ESTADOS_ANULADOS.includes(m.estado_matricula) ? (
                                     <button
                                       type="button"
                                       onClick={() => handleDesmatricular(m)}
@@ -639,7 +639,7 @@ export function StudentDetail({ student, onClose, onChanged }) {
                                       {bajas.desmatriculando(m.id) ? 'Anulando…' : 'Desmatricular'}
                                     </button>
                                   ) : (
-                                    <span className="text-xs text-slate-400">{m.consolidada ? 'Consolidada' : '—'}</span>
+                                    <span className="text-xs text-slate-400">—</span>
                                   )}
                                 </td>
                               )}

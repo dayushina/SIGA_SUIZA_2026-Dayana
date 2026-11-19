@@ -72,9 +72,10 @@ async def datos(db_session):
     """), {"a": EST_A, "b": EST_B, "c": EST_LIMPIO})
     await db_session.execute(text("""
         INSERT INTO matriculas (id, estudiante_id, programa_id, periodo_id, estado_matricula, tipo_ingreso,
-                                consolidada, created_at, updated_at) VALUES
-            (:ma, :a, 1, 1, 'confirmada', 'Ordinario', false, NOW(), NOW()),
-            (:mb, :b, 1, 1, 'confirmada', 'Ordinario', false, NOW(), NOW())
+                                consolidada, registro_academico, boleta_codigo, created_at, updated_at) VALUES
+            -- Igual que al terminar el asistente: consolidada (registro academico + boleta QR)
+            (:ma, :a, 1, 1, 'confirmada', 'Ordinario', true, 'RA-1-00601', 'BOL-TEST-601', NOW(), NOW()),
+            (:mb, :b, 1, 1, 'confirmada', 'Ordinario', false, NULL, NULL, NOW(), NOW())
     """), {"ma": MAT_A, "mb": MAT_B, "a": EST_A, "b": EST_B})
     await db_session.execute(text("""
         INSERT INTO matricula_detalles (id, matricula_id, unidad_didactica_id, creditos, estado_curso, created_at, updated_at)
@@ -127,6 +128,7 @@ async def test_flujo_completo_desmatricular_anular_y_eliminar(client, datos):
     # La lista de estudiantes expone la matricula vigente (habilita "Desmatricular" en pantalla)
     lista = {e["id"]: e for e in (await client.get("/estudiantes/", headers=h(SECRETARIA))).json()}
     assert lista[EST_A]["matricula_vigente"]["id"] == MAT_A
+    assert lista[EST_A]["matricula_vigente"]["consolidada"] is True  # consolidada NO impide desmatricular
     assert lista[EST_LIMPIO]["matricula_vigente"] is None
 
     # 1. Desmatricular (motivo obligatorio)
