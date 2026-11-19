@@ -5,13 +5,14 @@ Lo ejecuta start_railway.sh ANTES de las migraciones:
     python -m bootstrap.restore_seed
 
 Politica (variable SIGA_SEED_MODE):
-    auto     (defecto) Restaura solo si la BD esta vacia, o si solo contiene lo que
+    skip     (defecto) No restaura nada. Una BD reconstruida desde cero arranca
+             solo con el superadmin que crea el Core (SIGA_ADMIN_PASSWORD).
+    auto     Opt-in. Restaura solo si la BD esta vacia, o si solo contiene lo que
              un arranque previo sin datos genero automaticamente (roles, permisos,
              un admin...). Una BD con datos de negocio NUNCA se toca: tras la
              primera carga, produccion es la fuente de verdad.
-    replace  Reemplaza la BD cuando el snapshot del repositorio es distinto del
-             ultimo aplicado. Util ANTES de salir a produccion; quitala despues.
-    skip     No restaura nada.
+    replace  Opt-in. Reemplaza la BD cuando el snapshot del repositorio es distinto
+             del ultimo aplicado. Util ANTES de salir a produccion; quitala despues.
 
 Toda la restauracion ocurre en UNA transaccion: si algo falla (incluida la
 verificacion de filas por tabla) no queda nada a medias.
@@ -47,6 +48,7 @@ AUTO_GENERATED_TABLES = {
     "core_users", "core_user_roles", "core_modules", "core_audit_logs",
     "outbox_events",
 }
+DEFAULT_MODE = "skip"  # reconstruir = solo el superadmin; restaurar el snapshot es opt-in
 MAX_AUTO_USERS = 1  # el arranque sin datos crea un unico superadmin
 
 PRODUCTION_ENVIRONMENTS = {"production", "prod"}
@@ -256,15 +258,15 @@ def harden_public_accounts(conn, dev_users: List[dict], env=os.environ) -> List[
 
 
 def _dev_users() -> List[dict]:
-    from app.core.identity.seeds.user_seeder import DEV_USERS
-    return DEV_USERS
+    from app.core.identity.seeds.user_seeder import LEGACY_PUBLIC_ACCOUNTS
+    return LEGACY_PUBLIC_ACCOUNTS
 
 
 # ---------------------------------------------------------------------------
 # Punto de entrada
 # ---------------------------------------------------------------------------
 def run(env=os.environ, seed_file: Path = SEED_FILE) -> int:
-    mode = (env.get("SIGA_SEED_MODE") or "auto").strip().lower()
+    mode = (env.get("SIGA_SEED_MODE") or DEFAULT_MODE).strip().lower()
     if mode not in {"auto", "replace", "skip"}:
         raise SeedError(f"SIGA_SEED_MODE invalido: {mode!r} (usa auto, replace o skip)")
     production = (env.get("ENVIRONMENT") or "").strip().lower() in PRODUCTION_ENVIRONMENTS

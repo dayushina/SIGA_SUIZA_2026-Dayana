@@ -894,6 +894,12 @@ class RoleSeeder:
 ```
 
 **`user_seeder.py` - UserSeeder:**
+
+> **Politica vigente:** al reconstruir la BD (`core_users` vacia) se crea **un unico
+> usuario**, el superadmin (`SIGA_ADMIN_EMAIL` / `SIGA_ADMIN_PASSWORD`), en todos los
+> entornos (local, Docker y Railway). No se crean cuentas de prueba. El codigo de
+> abajo es el diseño original y se conserva solo como referencia historica.
+
 ```python
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

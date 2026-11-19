@@ -57,6 +57,10 @@ services:
     environment:
       <<: *db-env
       REDIS_URL: redis://redis:6379
+      # Unico usuario que se crea al reconstruir la BD (core_users vacia).
+      # Sin SIGA_ADMIN_PASSWORD, en desarrollo se genera una y se muestra en el log.
+      SIGA_ADMIN_EMAIL: ${SIGA_ADMIN_EMAIL:-admin@siga.edu}
+      SIGA_ADMIN_PASSWORD: ${SIGA_ADMIN_PASSWORD:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health')"]
       interval: 15s

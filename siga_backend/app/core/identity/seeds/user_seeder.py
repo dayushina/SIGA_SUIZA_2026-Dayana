@@ -2,6 +2,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Dict, Any
 import os
+import secrets
 import bcrypt
 
 from .base_seeder import BaseSeeder, SeederFatalError
@@ -10,100 +11,73 @@ from ...config import settings
 
 PRODUCTION_ENVIRONMENTS = {"production", "prod"}
 MIN_ADMIN_PASSWORD_LENGTH = 12
+DEFAULT_ADMIN_EMAIL = "admin@siga.edu"
 
 
 def is_production() -> bool:
     return (settings.environment or "").strip().lower() in PRODUCTION_ENVIRONMENTS
 
-# Cuentas de desarrollo: sus contrasenas son publicas (estan en el repositorio),
-# por eso NUNCA se crean en produccion.
-DEV_USERS: List[Dict[str, Any]] = [
-    {
-        "email": "admin@siga.edu",
-        "password": "admin123",
-        "full_name": "Super Admin",
-        "roles": ["superadmin"],
-        "is_superuser": True
-    },
-    {
-        "email": "tesoreria@siga.edu",
-        "password": "tesoreria123",
-        "full_name": "Caja Principal",
-        "roles": ["caja_tesoreria"],
-        "is_superuser": False
-    },
-    {
-        "email": "secretaria@siga.edu",
-        "password": "secretaria123",
-        "full_name": "Secretaría Académica",
-        "roles": ["secretaria_academica"],
-        "is_superuser": False
-    },
-    {
-        "email": "secretaria_prog@siga.edu",
-        "password": "secretariaprog123",
-        "full_name": "Secretaría de Programa (Computación)",
-        "roles": ["secretaria_programa"],
-        "is_superuser": False
-    },
-    {
-        "email": "coordinador@siga.edu",
-        "password": "coordinador123",
-        "full_name": "Jefatura de Programa (Computación)",
-        "roles": ["coordinador_programa"],
-        "is_superuser": False
-    },
-    {
-        "email": "admision@siga.edu",
-        "password": "admision123",
-        "full_name": "Oficina de Admisión",
-        "roles": ["admin_admision"],
-        "is_superuser": False
-    },
-    {
-        "email": "docente@siga.edu", 
-        "password": "docente123",
-        "full_name": "Docente Titular",
-        "roles": ["docente"],
-        "is_superuser": False
-    },
-    {
-        "email": "estudiante@siga.edu",
-        "password": "estudiante123", 
-        "full_name": "Estudiante Promedio",
-        "roles": ["estudiante"],
-        "is_superuser": False
-    }
+
+# Cuentas de prueba que versiones anteriores creaban en desarrollo, con sus
+# contrasenas PUBLICAS (estan en el repositorio). Ya NO se crean en ningun
+# entorno; la lista se conserva solo para que bootstrap/restore_seed.py pueda
+# detectarlas y desactivarlas en bases de datos antiguas o snapshots.
+LEGACY_PUBLIC_ACCOUNTS: List[Dict[str, Any]] = [
+    {"email": "admin@siga.edu", "password": "admin123"},
+    {"email": "tesoreria@siga.edu", "password": "tesoreria123"},
+    {"email": "secretaria@siga.edu", "password": "secretaria123"},
+    {"email": "secretaria_prog@siga.edu", "password": "secretariaprog123"},
+    {"email": "coordinador@siga.edu", "password": "coordinador123"},
+    {"email": "admision@siga.edu", "password": "admision123"},
+    {"email": "docente@siga.edu", "password": "docente123"},
+    {"email": "estudiante@siga.edu", "password": "estudiante123"},
 ]
+PUBLIC_PASSWORDS = {u["password"] for u in LEGACY_PUBLIC_ACCOUNTS}
 
 
 class UserSeeder(BaseSeeder):
-    """Seeder para usuarios del sistema"""
-    
+    """Crea el UNICO usuario inicial del sistema: el superadministrador.
+
+    Politica (igual en desarrollo, Docker y produccion/Railway):
+    - Solo actua si core_users esta vacia (BD recien construida).
+    - Email: SIGA_ADMIN_EMAIL (por defecto admin@siga.edu).
+    - Contrasena: SIGA_ADMIN_PASSWORD (>= 12 caracteres, no publica).
+        * Produccion: obligatoria; sin ella el Core no arranca.
+        * Desarrollo: si falta, se genera una aleatoria y se muestra UNA vez en el log.
+    Los demas usuarios se crean desde el sistema (Administracion).
+    """
+
     def get_dependencies(self) -> List[str]:
         return ["RoleSeeder"]
-    
-    async def should_run(self) -> bool:
-        result = await self.db.execute(select(CoreUser))
-        existing_users = result.scalars().all()
-        return len(existing_users) == 0
-    
-    def get_users_data(self) -> List[Dict[str, Any]]:
-        """Desarrollo: cuentas de prueba. Produccion: solo el superadmin definido por entorno."""
-        if not is_production():
-            return DEV_USERS
 
-        email = os.environ.get("SIGA_ADMIN_EMAIL", "").strip() or "admin@siga.edu"
+    async def should_run(self) -> bool:
+        result = await self.db.execute(select(CoreUser.id).limit(1))
+        return result.first() is None
+
+    def _admin_password(self) -> str:
         password = os.environ.get("SIGA_ADMIN_PASSWORD", "")
-        public_passwords = {u["password"] for u in DEV_USERS}
-        if len(password) < MIN_ADMIN_PASSWORD_LENGTH or password in public_passwords:
+        if not password:
+            if is_production():
+                raise SeederFatalError(
+                    "Base de datos sin usuarios en produccion: define SIGA_ADMIN_PASSWORD "
+                    f"(minimo {MIN_ADMIN_PASSWORD_LENGTH} caracteres) para crear el superadmin inicial."
+                )
+            password = secrets.token_urlsafe(18)
+            self.generated_password = password
+            return password
+        if len(password) < MIN_ADMIN_PASSWORD_LENGTH or password in PUBLIC_PASSWORDS:
             raise SeederFatalError(
-                "Base de datos sin usuarios en produccion: define SIGA_ADMIN_PASSWORD "
-                f"(minimo {MIN_ADMIN_PASSWORD_LENGTH} caracteres) para crear el superadmin inicial."
+                f"SIGA_ADMIN_PASSWORD es debil o publica: usa al menos {MIN_ADMIN_PASSWORD_LENGTH} "
+                "caracteres y no una contrasena publicada en el repositorio."
             )
+        return password
+
+    def get_users_data(self) -> List[Dict[str, Any]]:
+        self.generated_password = None
+        email = os.environ.get("SIGA_ADMIN_EMAIL", "").strip() or DEFAULT_ADMIN_EMAIL
         return [{
             "email": email,
-            "password": password,
+            "password": self._admin_password(),
             "full_name": "Super Admin",
             "roles": ["superadmin"],
             "is_superuser": True,
@@ -157,5 +131,10 @@ class UserSeeder(BaseSeeder):
         self.log_success(f"Creados {len(created_users)} usuarios")
         for email, roles_list in user_roles_info:
             self.log_success(f"  👤 {email} - Roles: {roles_list}")
+        if self.generated_password:
+            self.log_warning(
+                "SIGA_ADMIN_PASSWORD no esta definida: contrasena GENERADA para el superadmin "
+                f"(se muestra solo esta vez, guardala y cambiala al entrar): {self.generated_password}"
+            )
         
         return created_users

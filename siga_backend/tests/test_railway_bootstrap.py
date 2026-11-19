@@ -31,11 +31,50 @@ def production(monkeypatch):
     return monkeypatch
 
 
-def test_desarrollo_crea_cuentas_de_prueba(monkeypatch):
+@pytest.fixture
+def development(monkeypatch):
     monkeypatch.setattr(settings, "environment", "development")
-    data = us.UserSeeder(db=None).get_users_data()
-    assert {u["email"] for u in data} >= {"admin@siga.edu", "docente@siga.edu", "estudiante@siga.edu"}
-    assert len(data) == 8
+    monkeypatch.delenv("SIGA_ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("SIGA_ADMIN_EMAIL", raising=False)
+    return monkeypatch
+
+
+def test_desarrollo_crea_solo_el_superadmin_con_clave_generada(development):
+    seeder = us.UserSeeder(db=None)
+    data = seeder.get_users_data()
+    assert len(data) == 1
+    admin = data[0]
+    assert admin["email"] == "admin@siga.edu" and admin["roles"] == ["superadmin"] and admin["is_superuser"]
+    assert len(admin["password"]) >= us.MIN_ADMIN_PASSWORD_LENGTH
+    assert admin["password"] not in us.PUBLIC_PASSWORDS
+    assert seeder.generated_password == admin["password"]
+    # cada reconstruccion genera una clave distinta (nunca una fija/publica)
+    assert us.UserSeeder(db=None).get_users_data()[0]["password"] != admin["password"]
+
+
+def test_desarrollo_usa_las_variables_del_superadmin(development):
+    development.setenv("SIGA_ADMIN_PASSWORD", "Clave-Local-Segura-2026")
+    development.setenv("SIGA_ADMIN_EMAIL", "direccion@suiza.edu.pe")
+    seeder = us.UserSeeder(db=None)
+    data = seeder.get_users_data()
+    assert [(u["email"], u["password"]) for u in data] == [("direccion@suiza.edu.pe", "Clave-Local-Segura-2026")]
+    assert seeder.generated_password is None
+
+
+@pytest.mark.parametrize("pwd", ["corta", "admin123", "docente123"])
+def test_desarrollo_rechaza_password_debil_o_publica(development, pwd):
+    development.setenv("SIGA_ADMIN_PASSWORD", pwd)
+    with pytest.raises(SeederFatalError):
+        us.UserSeeder(db=None).get_users_data()
+
+
+@pytest.mark.parametrize("env", ["development", "production"])
+def test_ningun_entorno_crea_cuentas_de_prueba(monkeypatch, env):
+    monkeypatch.setattr(settings, "environment", env)
+    monkeypatch.setenv("SIGA_ADMIN_PASSWORD", "Una-Clave-Larga-2026!")
+    monkeypatch.delenv("SIGA_ADMIN_EMAIL", raising=False)
+    emails = {u["email"] for u in us.UserSeeder(db=None).get_users_data()}
+    assert emails == {"admin@siga.edu"}
 
 
 def test_produccion_sin_password_impide_arranque(production):

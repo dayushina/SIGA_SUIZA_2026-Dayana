@@ -134,6 +134,18 @@ def test_decide(mode, st, seed, accion):
     assert rs.decide(mode, st, seed)[0] == accion
 
 
+def test_modo_por_defecto_es_skip():
+    """Reconstruir la BD no debe restaurar el snapshot: solo el superadmin del Core."""
+    assert rs.DEFAULT_MODE == "skip"
+    assert rs.decide(rs.DEFAULT_MODE, state(), SEED)[0] == "none"
+    assert rs.decide(rs.DEFAULT_MODE, state(38, None, {}, 1), SEED)[0] == "none"
+
+
+def test_endurecimiento_usa_las_cuentas_publicas_historicas():
+    emails = {u["email"] for u in rs._dev_users()}
+    assert {"admin@siga.edu", "docente@siga.edu", "estudiante@siga.edu"} <= emails
+
+
 def test_decide_explica_por_que_no_pisa_produccion():
     accion, motivo = rs.decide("auto", state(38, SEED, {"estudiantes": 900}, 10), OTRO)
     assert accion == "none" and "fuente de verdad" in motivo and "SIGA_SEED_MODE=replace" in motivo

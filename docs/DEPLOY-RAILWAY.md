@@ -1,15 +1,17 @@
 # Despliegue en Railway (base de datos + backend)
 
-Un `git push` a `main` despliega el backend; en el **primer** arranque contra un
-Postgres vacio se restaura automaticamente **toda la base de datos** desde un
-snapshot cifrado versionado en el repositorio.
+Un `git push` a `main` despliega el backend. Por defecto (`SIGA_SEED_MODE=skip`)
+un Postgres vacio o reconstruido arranca **solo con el superadmin**
+(`SIGA_ADMIN_EMAIL` / `SIGA_ADMIN_PASSWORD`): no se crean cuentas de prueba ni
+datos. Restaurar el snapshot cifrado del repositorio es **opt-in**
+(`SIGA_SEED_MODE=auto` o `replace`, ver abajo).
 
 ## Como funciona
 
 ```
 git push ──> Railway construye Dockerfile (raiz) ──> start_railway.sh
    1. valida SECRET_KEY y la conexion a la BD
-   2. python -m bootstrap.restore_seed      <- snapshot de la BD (ver abajo)
+   2. python -m bootstrap.restore_seed      <- snapshot de la BD (solo si SIGA_SEED_MODE lo pide)
    3. alembic upgrade head                   <- migraciones nuevas, si las hay
    4. 7 modulos internos + Core Gateway en $PORT (healthcheck /health)
 ```
@@ -23,8 +25,9 @@ git push ──> Railway construye Dockerfile (raiz) ──> start_railway.sh
   con un mensaje `[seed] ERROR: ...`.
 - **Produccion es la fuente de verdad**: tras la primera carga, los siguientes
   despliegues NO sobrescriben la BD aunque el snapshot del repo cambie.
-- **Cuentas de prueba**: en produccion, las cuentas con contrasenas publicadas en
-  el repo se desactivan y el superadmin recibe `SIGA_ADMIN_PASSWORD`.
+- **Cuentas de prueba**: ya no se crean en ningun entorno. Si una BD antigua o un
+  snapshot las trae, en produccion las que conservan su contrasena publica se
+  desactivan y el superadmin recibe `SIGA_ADMIN_PASSWORD`.
 - Probado contra PostgreSQL 13, 17 y 18 (contenido identico tabla por tabla).
 
 ## Configuracion inicial (una sola vez)
@@ -63,9 +66,9 @@ Si la BD local no cambio, el exportador no reescribe nada.
 
 | Valor | Comportamiento |
 |---|---|
-| `auto` (defecto) | Restaura si la BD esta vacia o solo tiene lo que genero un arranque previo sin datos. Nunca toca una BD con datos reales. |
-| `replace` | Reemplaza la BD cuando el snapshot del repo es distinto del ultimo aplicado. Util **antes** de salir a produccion; **quitala despues** o cada snapshot nuevo pisara produccion. |
-| `skip` | No restaura nada. |
+| `skip` (defecto) | No restaura nada. Una BD vacia o reconstruida arranca **solo con el superadmin** (`SIGA_ADMIN_EMAIL` / `SIGA_ADMIN_PASSWORD`). |
+| `auto` | Opt-in. Restaura si la BD esta vacia o solo tiene lo que genero un arranque previo sin datos. Nunca toca una BD con datos reales. |
+| `replace` | Opt-in. Reemplaza la BD cuando el snapshot del repo es distinto del ultimo aplicado. Util **antes** de salir a produccion; **quitala despues** o cada snapshot nuevo pisara produccion. |
 
 El historial de cargas queda en la tabla `siga_meta.seed_history`.
 
