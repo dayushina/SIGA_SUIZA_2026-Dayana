@@ -225,7 +225,8 @@ async def actualizar_programa(programa_id: int, programa_data: ProgramaCreate, d
     if not programa:
         raise HTTPException(status_code=404, detail="Programa no encontrado")
 
-    for field, value in programa_data.model_dump().items():
+    # Solo los campos enviados: lo omitido (p.ej. plan_estudio_id) no se borra.
+    for field, value in programa_data.model_dump(exclude_unset=True).items():
         setattr(programa, field, value)
 
     await db.commit()

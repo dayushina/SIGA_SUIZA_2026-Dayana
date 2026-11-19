@@ -1,3 +1,4 @@
+import { PROGRAMAS_ESTUDIANTE } from '../../core/constants/programas';
 import { useState, useEffect, useCallback } from 'react';
 import { tesoreriaApi } from './lib/tesoreriaApi';
 
@@ -113,16 +114,4 @@ export const PAYMENT_METHODS = [
   { id: 'tarjeta_pos', nombre: 'Tarjeta POS (Débito/Crédito)', icono: 'CreditCard', descripcion: 'Pago con tarjeta Visa / Mastercard en módulo' }
 ];
 
-export const CAREERS_MAP = {
-  2: 'Enfermería Técnica',
-  3: 'Gestión Administrativa',
-  4: 'Asistencia Administrativa',
-  5: 'Contabilidad',
-  6: 'Mecatrónica Automotriz',
-  7: 'Electricidad Industrial',
-  8: 'Administración de Operaciones Turísticas',
-  9: 'Construcción Civil',
-  10: 'Producción Agropecuaria',
-  11: 'Manejo Forestal',
-  15: 'Desarrollo de Sistemas de Información'
-};
+export const CAREERS_MAP = PROGRAMAS_ESTUDIANTE;

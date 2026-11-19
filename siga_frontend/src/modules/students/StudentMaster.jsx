@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, Fragment } from 'react';
 import { createPortal } from 'react-dom';
 import { useAuth } from '../../core/auth/useAuth';
 import { API_BASE } from '../../core/api/client';
+import { PROGRAMAS_ESTUDIANTE_LISTA } from '../../core/constants/programas';
 import { useToast } from '../../core/ui/ToastContext';
 import techBg from '../../assets/tech-bg.jpg';
 import { EditStudentModal } from './EditStudentModal';
@@ -412,17 +413,7 @@ const createEmptyStudentForm = (programaId = '') => ({
 
 const PROGRAMAS = [
   { id: 'ALL', label: 'Todos los Programas' },
-  { id: '1', label: 'Administración de Operaciones Turísticas' },
-  { id: '2', label: 'Asistencia Administrativa' },
-  { id: '3', label: 'Contabilidad' },
-  { id: '4', label: 'Construcción Civil' },
-  { id: '5', label: 'Gestión Administrativa' },
-  { id: '6', label: 'Desarrollo de Sistemas de Información' },
-  { id: '7', label: 'Electricidad Industrial' },
-  { id: '8', label: 'Enfermería Técnica' },
-  { id: '9', label: 'Manejo Forestal' },
-  { id: '10', label: 'Mecatrónica Automotriz' },
-  { id: '11', label: 'Producción Agropecuaria' },
+  ...PROGRAMAS_ESTUDIANTE_LISTA,
 ];
 
 const PROGRAMAS_OPTIONS = [
@@ -544,7 +535,10 @@ export function StudentMaster() {
   const [editingStudent, setEditingStudent] = useState(null);
   const [wizardStep, setWizardStep] = useState(1);
   const [selectedStudent, setSelectedStudent] = useState(null);
-  const [currentPrograma, setCurrentPrograma] = useState('ALL');
+  // La secretaria de programa ve su programa (perfil del personal, enviado por /auth/me).
+  const [currentPrograma, setCurrentPrograma] = useState(() => (
+    userRole === 'secretaria_programa' && user?.programa_id ? String(user.programa_id) : 'ALL'
+  ));
   const [stepDir, setStepDir] = useState('forward');
   const [loadError, setLoadError] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
@@ -698,12 +692,7 @@ export function StudentMaster() {
 
   useEffect(() => {
     if (userRole !== 'invitado') {
-      if (userRole === 'secretaria_programa' && currentPrograma === 'ALL') {
-        const fallbackId = user?.email === 'secretaria_prog@siga.edu' ? '2' : '1';
-        setCurrentPrograma(user?.programa_id ? String(user.programa_id) : fallbackId);
-      } else {
-        handleSearch(searchTerm);
-      }
+      handleSearch(searchTerm);
     }
   }, [currentPrograma, userRole]);
 

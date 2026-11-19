@@ -165,6 +165,9 @@ class SolicitudTramiteResponse(SolicitudTramiteCreate):
     fecha_solicitud: date
     fecha_resolucion: Optional[date] = None
     documento_url: Optional[str] = None
+    # Datos del estudiante para mostrar en listados (solo lectura)
+    nombre_alumno: Optional[str] = None
+    dni_alumno: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 class ConvalidacionDetalleCreate(BaseModel):

@@ -6,6 +6,7 @@ from sqlalchemy.orm import selectinload
 from database import get_db, OutboxEvent
 from models import Estudiante, Matricula, MatriculaDetalle
 from schemas import EstudianteCreate, EstudianteResponse, EstudianteUpdate, MatriculaCreate, MatriculaResponse, IngestaMasivaRequest
+from admision_normalizer import normalizar_admitido
 from datetime import datetime
 from typing import List, Optional
 from pathlib import Path
@@ -127,7 +128,8 @@ async def ingesta_admitidos(request: Request, data: IngestaMasivaRequest, db: As
         year = datetime.now().year
         codigo = f"{year}-{admitido.dni}"
         
-        # 2. Crear Estudiante
+        # 2. Crear Estudiante (normalizando la fila cruda del Excel de Admision)
+        datos = normalizar_admitido(admitido.metadata_completa, admitido.fecha_nacimiento)
         db_estudiante = Estudiante(
             codigo_estudiante=codigo,
             dni=admitido.dni,
@@ -136,8 +138,10 @@ async def ingesta_admitidos(request: Request, data: IngestaMasivaRequest, db: As
             programa_id=admitido.programa_id,
             celular=admitido.celular,
             email_personal=admitido.email_personal,
+            fecha_nacimiento=datos["fecha_nacimiento"],
+            direccion_domicilio=datos["direccion"],
             modalidad_admision=admitido.modalidad,
-            metadata_admision=admitido.metadata_completa
+            metadata_admision=datos["metadata"]
         )
         db.add(db_estudiante)
         await db.flush() # para obtener el ID
@@ -874,8 +878,18 @@ async def crear_tramite(data: SolicitudTramiteCreate, db: AsyncSession = Depends
 
 @router.get("/tramites/", response_model=List[SolicitudTramiteResponse])
 async def obtener_tramites(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(SolicitudTramite).order_by(SolicitudTramite.fecha_solicitud.desc()))
-    return result.scalars().all()
+    result = await db.execute(
+        select(SolicitudTramite, Estudiante.nombres, Estudiante.apellidos, Estudiante.dni)
+        .outerjoin(Estudiante, Estudiante.id == SolicitudTramite.estudiante_id)
+        .order_by(SolicitudTramite.fecha_solicitud.desc(), SolicitudTramite.id.desc())
+    )
+    tramites = []
+    for tramite, nombres, apellidos, dni in result.all():
+        item = SolicitudTramiteResponse.model_validate(tramite)
+        item.nombre_alumno = " ".join(p for p in (nombres, apellidos) if p) or None
+        item.dni_alumno = dni
+        tramites.append(item)
+    return tramites
 
 @router.put("/tramites/{tramite_id}/estado", response_model=SolicitudTramiteResponse)
 async def actualizar_estado_tramite(tramite_id: int, estado: str, db: AsyncSession = Depends(get_db)):

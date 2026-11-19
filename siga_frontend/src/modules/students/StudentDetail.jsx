@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { API_BASE } from '../../core/api/client';
+import { PROGRAMAS_ESTUDIANTE } from '../../core/constants/programas';
+import { readStudentProfile } from './studentMetadata';
 import techBg from '../../assets/tech-bg.jpg';
 import { ProtectedImage } from './ProtectedImage';
 import {
@@ -22,19 +24,7 @@ function formatearEdad(fechaNacimiento, hoy = new Date()) {
   return edad > 0 ? `${edad} años` : null;
 }
 
-const PROGRAMAS = {
-  1: 'Administración de Operaciones Turísticas',
-  2: 'Asistencia Administrativa',
-  3: 'Contabilidad',
-  4: 'Construcción Civil',
-  5: 'Gestión Administrativa',
-  6: 'Desarrollo de Sistemas de Información',
-  7: 'Electricidad Industrial',
-  8: 'Enfermería Técnica',
-  9: 'Manejo Forestal',
-  10: 'Mecatrónica Automotriz',
-  11: 'Producción Agropecuaria',
-};
+const PROGRAMAS = PROGRAMAS_ESTUDIANTE;
 
 const ESTADO_COLORS = {
   postulante: 'bg-amber-100 text-amber-900 border-amber-300 ring-2 ring-amber-300/30',
@@ -210,52 +200,48 @@ export function StudentDetail({ student, onClose }) {
   const initials = `${(s.nombres || '')[0] || ''}${(s.apellidos || '')[0] || ''}`.toUpperCase();
   const programaNombre = PROGRAMAS[s.programa_id] || (s.programa_id ? `Programa ${s.programa_id}` : 'Sin carrera asignada');
 
-  const fechaNac = s.fecha_nacimiento
-    ? new Date(s.fecha_nacimiento + 'T00:00:00').toLocaleDateString('es-PE', { day: '2-digit', month: 'long', year: 'numeric' })
+  // Datos personales: columnas + metadata_admision (formato SIGA o Excel de Admision)
+  const perfil = readStudentProfile(s);
+  const fechaNac = perfil.fechaNacimiento
+    ? new Date(perfil.fechaNacimiento + 'T00:00:00').toLocaleDateString('es-PE', { day: '2-digit', month: 'long', year: 'numeric' })
     : null;
 
-  const edad = formatearEdad(s.fecha_nacimiento);
-
-  const meta = s.metadata_admision || {};
+  const edad = formatearEdad(perfil.fechaNacimiento);
 
   // Ubigeo y Domicilio
-  const depto = meta.departamento || meta.ubigeo?.departamento || null;
-  const prov = meta.provincia || meta.ubigeo?.provincia || null;
-  const dist = meta.distrito || meta.ubigeo?.distrito || null;
-  const direccion = s.direccion_domicilio || meta.direccion_residencia || null;
+  const depto = perfil.departamento;
+  const prov = perfil.provincia;
+  const dist = perfil.distrito;
+  const direccion = perfil.direccion;
   const ubicacionCompleta = (dist || prov || depto)
     ? [dist, prov, depto].filter(Boolean).join(', ')
     : null;
 
   // Identidad
-  const genero = meta.genero || meta.sexo || null;
-  const estadoCivil = meta.estado_civil || null;
-  const nacionalidad = meta.nacionalidad || 'Peruana';
-  const discapacidad = meta.discapacidad === true || meta.discapacidad === 'SI' || (meta.tipo_discapacidad && meta.tipo_discapacidad !== 'NO');
-  const tipoDiscapacidad = meta.tipo_discapacidad || (discapacidad ? 'Presenta discapacidad' : 'Ninguna');
+  const genero = perfil.genero;
+  const estadoCivil = perfil.estadoCivil;
+  const nacionalidad = perfil.nacionalidad;
+  const discapacidad = perfil.discapacidad;
+  const tipoDiscapacidad = perfil.tipoDiscapacidad
+    || (discapacidad ? 'Presenta discapacidad' : (perfil.discapacidadConocida ? 'Ninguna' : null));
 
   // Socioeconómico
-  const socio = meta.socioeconomico || {};
-  const trabaja = socio.trabaja !== undefined ? Boolean(socio.trabaja) : (meta.trabaja !== undefined ? Boolean(meta.trabaja) : null);
-  const ingresoMensual = socio.ingreso_mensual !== undefined ? socio.ingreso_mensual : meta.ingreso_mensual;
-  const tipoVivienda = socio.tipo_vivienda || meta.tipo_vivienda || null;
-  const tieneInternet = socio.tiene_internet_en_casa !== undefined ? Boolean(socio.tiene_internet_en_casa) : (meta.tiene_internet_en_casa !== undefined ? Boolean(meta.tiene_internet_en_casa) : null);
+  const trabaja = perfil.trabaja;
+  const ingresoMensual = perfil.ingresoMensual;
+  const tipoVivienda = perfil.tipoVivienda;
+  const tieneInternet = perfil.tieneInternet;
 
   // Salud y Procedencia
-  const salud = meta.salud_procedencia || {};
-  const ie = meta.institucion_educativa || {};
-  const colegio = salud.colegio_procedencia || ie.nombre || meta.colegio_procedencia || null;
-  const anioEgreso = salud.año_egreso_colegio || salud.anio_egreso_colegio || ie.anio_egreso || meta.anio_termino_secundaria || meta.año_egreso_colegio || null;
-  const tipoSangre = salud.tipo_sangre || meta.tipo_sangre || null;
-  const seguroSalud = salud.seguro_salud || meta.seguro_salud || null;
+  const colegio = perfil.colegio;
+  const anioEgreso = perfil.anioEgreso;
+  const tipoSangre = perfil.tipoSangre;
+  const seguroSalud = perfil.seguroSalud;
 
   // Contacto de Emergencia / Apoderado
-  const emergencia = meta.emergencia || {};
-  const apoderado = meta.apoderado || {};
-  const contactoNombre = emergencia.contacto_nombre || apoderado.nombre || meta.contacto_emergencia_nombre || null;
-  const contactoTelefono = emergencia.contacto_telefono || apoderado.celular || meta.contacto_emergencia_telefono || null;
-  const padre = apoderado.nombre_padre || emergencia.nombre_padre || meta.nombre_padre || null;
-  const madre = apoderado.nombre_madre || emergencia.nombre_madre || meta.nombre_madre || null;
+  const contactoNombre = perfil.contactoNombre;
+  const contactoTelefono = perfil.contactoTelefono;
+  const padre = perfil.padre;
+  const madre = perfil.madre;
 
   // Expediente
   const fechaLimiteDocs = s.fecha_limite_documentos
@@ -432,7 +418,7 @@ export function StudentDetail({ student, onClose }) {
                       <InfoField icon={Activity} label="Estado Civil" value={estadoCivil} />
                       <InfoField icon={Building2} label="Nacionalidad" value={nacionalidad} />
                       <InfoField icon={HeartPulse} label="Condición de Discapacidad" value={tipoDiscapacidad} highlight={discapacidad} />
-                      <InfoField icon={Phone} label="Teléfono Celular" value={s.celular} highlight />
+                      <InfoField icon={Phone} label="Teléfono Celular" value={perfil.celular} highlight />
 
                       <div className="sm:col-span-2 lg:col-span-3">
                         <InfoField icon={MapPin} label="Dirección de Domicilio" value={direccion} wide />
@@ -448,7 +434,7 @@ export function StudentDetail({ student, onClose }) {
                         />
                       </div>
 
-                      <InfoField icon={Mail} label="Email Personal" value={s.email_personal} />
+                      <InfoField icon={Mail} label="Email Personal" value={perfil.email} />
                       <InfoField icon={Mail} label="Email Institucional" value={s.email_institucional} wide />
                     </div>
                   </div>

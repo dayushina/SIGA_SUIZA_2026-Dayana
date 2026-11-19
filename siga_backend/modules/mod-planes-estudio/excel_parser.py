@@ -49,7 +49,11 @@ class ExcelMineduParser:
                     if val_lower in ["i", "ii", "iii", "iv", "v", "vi", "1", "2", "3", "4", "5", "6", "periodo"]:
                         found_cols[val_lower] = j
             
-            if len([k for k in found_cols.keys() if any(rk in k for rk in required_keywords)]) >= 2 and any("unidad" in k for k in found_cols.keys()):
+            # Las palabras clave deben estar en columnas DISTINTAS: una sola celda de texto
+            # largo (ej. "Unidad de competencia N.° 1: ... horas de funcionamiento ...")
+            # no es una cabecera de tabla.
+            required_cols = {c for k, c in found_cols.items() if any(rk in k for rk in required_keywords)}
+            if len(required_cols) >= 2 and any("unidad" in k for k in found_cols.keys()):
                 return i, found_cols
                 
         return None

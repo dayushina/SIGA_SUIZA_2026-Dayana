@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { API_BASE } from '../../core/api/client';
 import { useAuth } from '../../core/auth/useAuth';
+import { PROGRAMAS_ESTUDIANTE_LISTA } from '../../core/constants/programas';
 import { EnrollmentProcess } from './EnrollmentProcess';
 import { EnrollmentFlowDiagram } from './EnrollmentFlowDiagram';
 import { AdmissionPanel } from './AdmissionPanel';
@@ -214,19 +215,17 @@ export function EnrollmentDashboard() {
       <div className="glass-card p-2 mb-8 flex items-center max-w-3xl gap-2">
         {['superadmin', 'admin'].includes(userRole) && (
           <select 
-            className="input-field py-3 text-sm bg-slate-50 border-none w-48 font-bold text-primary"
+            className="input-field py-3 text-sm bg-slate-50 border-none w-48 sm:w-72 font-bold text-primary truncate"
+            title="Filtrar por programa de estudio"
             value={currentPrograma}
             onChange={(e) => {
               setCurrentPrograma(e.target.value);
             }}
           >
             <option value="ALL">Todos los Programas</option>
-            <option value="1">Arquitectura de Plat.</option>
-            <option value="2">Enfermería Técnica</option>
-            <option value="3">Diseño Gráfico</option>
-            <option value="4">Administración</option>
-            <option value="5">Contabilidad</option>
-            <option value="6">Mecatrónica</option>
+            {PROGRAMAS_ESTUDIANTE_LISTA.map(p => (
+              <option key={p.id} value={p.id}>{p.label}</option>
+            ))}
           </select>
         )}
         <span className="px-4 text-slate-400 text-xl">🔍</span>

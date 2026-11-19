@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
+import { apiClient } from '../api/client';
+import { PROGRAMAS_ESTUDIANTE_LISTA } from '../constants/programas';
 import { 
   Bot, 
   Sparkles, 
@@ -19,19 +21,8 @@ import {
 
 // Base de conocimiento institucional y normativa MINEDU del IESTP Suiza
 const INSTITUTIONAL_KB = {
-  carreras: [
-    { nombre: 'Desarrollo de Sistemas de Información', creditos: 126, modulos: 3, duracion: '6 Semestres (3 Años)', resolucion: 'R.M. 0584722' },
-    { nombre: 'Enfermería Técnica', creditos: 126, modulos: 3, duracion: '6 Semestres (3 Años)', resolucion: 'R.M. 0584722' },
-    { nombre: 'Contabilidad', creditos: 126, modulos: 3, duracion: '6 Semestres (3 Años)', resolucion: 'R.M. 0584722' },
-    { nombre: 'Construcción Civil', creditos: 128, modulos: 3, duracion: '6 Semestres (3 Años)', resolucion: 'R.M. 0584722' },
-    { nombre: 'Mecatrónica Automotriz', creditos: 126, modulos: 3, duracion: '6 Semestres (3 Años)', resolucion: 'R.M. MINEDU' },
-    { nombre: 'Producción Agropecuaria', creditos: 126, modulos: 3, duracion: '6 Semestres (3 Años)', resolucion: 'R.M. MINEDU' },
-    { nombre: 'Electricidad Industrial', creditos: 126, modulos: 3, duracion: '6 Semestres (3 Años)', resolucion: 'R.M. MINEDU' },
-    { nombre: 'Mecánica de Producción Industrial', creditos: 126, modulos: 3, duracion: '6 Semestres (3 Años)', resolucion: 'R.M. MINEDU' },
-    { nombre: 'Gestión Administrativa', creditos: 126, modulos: 3, duracion: '6 Semestres (3 Años)', resolucion: 'R.M. MINEDU' },
-    { nombre: 'Guía Oficial de Turismo', creditos: 126, modulos: 3, duracion: '6 Semestres (3 Años)', resolucion: 'R.M. MINEDU' },
-    { nombre: 'Asistencia Administrativa', creditos: 126, modulos: 3, duracion: '6 Semestres (3 Años)', resolucion: 'R.M. MINEDU' }
-  ],
+  // Programas reales: se reemplazan por /programas al abrir el asistente.
+  carreras: PROGRAMAS_ESTUDIANTE_LISTA.map(p => ({ id: Number(p.id), nombre: p.label, creditos: null, duracion_periodos: 6 })),
   normas: {
     regla70: `Según los lineamientos del MINEDU (DOC-10 y DOC-15) para la Educación Técnico-Productiva y Superior Tecnológica:
 • **Regla del 70% de Créditos:** El estudiante debe aprobar como mínimo el **70% del total de créditos** matriculados en el semestre lectivo para tener derecho a ser promovido al siguiente periodo.
@@ -58,7 +49,10 @@ let messageIdSeq = 0;
 const nextMessageId = () => `${Date.now()}-${(messageIdSeq += 1)}`;
 
 // Generador de respuestas con inteligencia contextual institucional
-function generateAIResponse(userInput) {
+function generateAIResponse(userInput, carreras = INSTITUTIONAL_KB.carreras) {
+  const porId = (id) => carreras.find(c => Number(c.id) === id) || { nombre: '', creditos: null, duracion_periodos: 6 };
+  const duracion = (c) => `${c.duracion_periodos || 6} Semestres`;
+  const creditos = (c) => (c.creditos ? `${c.creditos} créditos` : 'créditos según plan MINEDU');
   const query = (userInput || '').toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
   // 1. Regla del 70% de créditos o cómo pasar de semestre
@@ -88,24 +82,24 @@ Recuerda que la asistencia mínima requerida para tener derecho a evaluación es
 
   // 3. Consulta de carreras / programas
   if (query.includes('carrera') || query.includes('programa') || query.includes('todas las carrera') || query.includes('cuantas carrera') || query.includes('catalogo')) {
-    const lista = INSTITUTIONAL_KB.carreras.map((c, i) => `${i + 1}. **${c.nombre}** (${c.creditos} créditos · ${c.resolucion})`).join('\n');
+    const lista = carreras.map((c, i) => `${i + 1}. **${c.nombre}** (${creditos(c)})`).join('\n');
     return {
-      title: '11 Carreras Profesionales Técnicas del IESTP Suiza',
-      badge: '100% Licenciadas por MINEDU',
-      content: `El **IESTP Suiza** cuenta con 11 programas de estudio oficiales, todos con plan formativo modular:\n\n${lista}\n\n💡 *Cada carrera consta de 6 semestres académicos organizados en 3 módulos formativos con certificación progresiva.*`
+      title: `${carreras.length} Programas de Estudio del IESTP Suiza`,
+      badge: 'Catálogo registrado en SIGA',
+      content: `El **IESTP Suiza** tiene ${carreras.length} programas de estudio registrados en el sistema:\n\n${lista}\n\n💡 *Cada programa se organiza en módulos formativos con certificación progresiva.*`
     };
   }
 
   // 4. Consulta específica sobre Sistemas / DSI
   if (query.includes('sistema') || query.includes('dsi') || query.includes('computo') || query.includes('software') || query.includes('programacion')) {
-    const c = INSTITUTIONAL_KB.carreras[0];
+    const c = porId(1);
     return {
       title: `Programa: ${c.nombre}`,
-      badge: `${c.creditos} Créditos · ${c.resolucion}`,
+      badge: `${creditos(c)}`,
       content: `El programa de **${c.nombre}** forma profesionales capacitados para desarrollar, implementar y administrar sistemas de software empresarial, bases de datos y soluciones web/móviles.
 
-• **Duración:** ${c.duracion}
-• **Créditos Totales:** ${c.creditos} créditos modulares.
+• **Duración:** ${duracion(c)}
+• **Créditos Totales:** ${creditos(c)}.
 • **Certificación:** 3 certificaciones modulares (Desarrollo Web, Gestión de Bases de Datos y Soluciones Empresariales).
 • **Modalidad:** Presencial con turnos Diurno y Nocturno.`
     };
@@ -113,28 +107,27 @@ Recuerda que la asistencia mínima requerida para tener derecho a evaluación es
 
   // 5. Consulta sobre Construcción Civil
   if (query.includes('construccion') || query.includes('civil') || query.includes('obras') || query.includes('edificacion')) {
-    const c = INSTITUTIONAL_KB.carreras[3];
+    const c = porId(9);
     return {
       title: `Programa: ${c.nombre}`,
-      badge: `${c.creditos} Créditos MINEDU`,
+      badge: `${creditos(c)}`,
       content: `El programa de **${c.nombre}** prepara técnicos expertos en topografía, supervisión de obra, diseño de estructuras, metrados y control de calidad en proyectos de infraestructura civil.
 
-• **Duración:** ${c.duracion}
-• **Créditos Totales:** ${c.creditos} créditos (diseño modular MINEDU).
-• **Resolución:** ${c.resolucion}.`
+• **Duración:** ${duracion(c)}
+• **Créditos Totales:** ${creditos(c)}.`
     };
   }
 
   // 6. Consulta sobre Enfermería Técnica
   if (query.includes('enfermer') || query.includes('salud') || query.includes('clinica')) {
-    const c = INSTITUTIONAL_KB.carreras[1];
+    const c = porId(2);
     return {
       title: `Programa: ${c.nombre}`,
-      badge: `${c.creditos} Créditos de Salud`,
+      badge: `${creditos(c)}`,
       content: `El programa de **${c.nombre}** brinda formación integral para la atención integral del paciente, asistencia en procedimientos clínicos, salud comunitaria y primeros auxilios.
 
-• **Duración:** ${c.duracion}
-• **Créditos Totales:** ${c.creditos} créditos.
+• **Duración:** ${duracion(c)}
+• **Créditos Totales:** ${creditos(c)}.
 • **Prácticas:** Horas clínicas en centros de salud y hospitales de la región.`
     };
   }
@@ -220,6 +213,23 @@ Estoy preparado para resolver tus dudas sobre el catálogo de carreras, la regla
   const [inputMessage, setInputMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef(null);
+  const [carreras, setCarreras] = useState(INSTITUTIONAL_KB.carreras);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let vivo = true;
+    apiClient.request('/api/mod-programas-estudio/programas')
+      .then(data => {
+        if (vivo && Array.isArray(data) && data.length) {
+          setCarreras([...data]
+            .filter(p => p.estado !== 'inactivo')
+            .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'))
+            .map(p => ({ id: p.id, nombre: p.nombre, creditos: p.creditos_totales || null, duracion_periodos: p.duracion_periodos })));
+        }
+      })
+      .catch(() => { /* sin conexion: se usa el catalogo local */ });
+    return () => { vivo = false; };
+  }, [isOpen]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -248,7 +258,7 @@ Estoy preparado para resolver tus dudas sobre el catálogo de carreras, la regla
 
     // Respuesta inteligente simulando inferencia cognitiva
     setTimeout(() => {
-      const response = generateAIResponse(query);
+      const response = generateAIResponse(query, carreras);
       const aiMsg = {
         id: nextMessageId(),
         sender: 'ai',

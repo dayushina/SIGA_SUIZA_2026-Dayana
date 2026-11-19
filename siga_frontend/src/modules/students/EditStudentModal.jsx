@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { API_BASE } from '../../core/api/client';
+import { PROGRAMAS_ESTUDIANTE } from '../../core/constants/programas';
+import { readStudentProfile } from './studentMetadata';
 import techBg from '../../assets/tech-bg.jpg';
 import { DEPARTAMENTOS, getProvincias, getDistritos } from './ubigeoPeru';
 import {
@@ -9,19 +11,7 @@ import {
   Building2, Activity, GraduationCap, HeartPulse, ShieldCheck
 } from 'lucide-react';
 
-const PROGRAMAS = {
-  1: 'Administración de Operaciones Turísticas',
-  2: 'Asistencia Administrativa',
-  3: 'Contabilidad',
-  4: 'Construcción Civil',
-  5: 'Gestión Administrativa',
-  6: 'Desarrollo de Sistemas de Información',
-  7: 'Electricidad Industrial',
-  8: 'Enfermería Técnica',
-  9: 'Manejo Forestal',
-  10: 'Mecatrónica Automotriz',
-  11: 'Producción Agropecuaria',
-};
+const PROGRAMAS = PROGRAMAS_ESTUDIANTE;
 
 function SearchSelect({
   label,
@@ -226,6 +216,7 @@ const EditField = ({
           disabled={disabled || readOnly}
           className="w-full px-3.5 py-2.5 bg-white border-2 border-slate-300 rounded-xl text-slate-950 font-bold text-sm focus:border-primary focus:ring-4 focus:ring-primary/15 outline-none transition-all shadow-xs disabled:bg-slate-100 disabled:text-slate-500"
         >
+          {!value && <option value="">— Sin registrar —</option>}
           {options.map((opt) => (
             <option key={opt} value={opt}>{opt}</option>
           ))}
@@ -268,23 +259,25 @@ export function EditStudentModal({ student, onClose, onUpdated }) {
 
   useEffect(() => {
     if (student) {
-      const meta = student.metadata_admision || {};
+      // Lee columnas + metadata (formato SIGA o Excel de Admision). Si un dato no
+      // existe queda vacio ("Sin registrar"): nunca se inventa un valor por defecto.
+      const perfil = readStudentProfile(student);
       setForm({
         nombres: student.nombres || '',
         apellidos: student.apellidos || '',
         dni: student.dni || '',
-        fecha_nacimiento: student.fecha_nacimiento || '',
-        genero: meta.genero || meta.sexo || 'Masculino',
-        estado_civil: meta.estado_civil || 'Soltero',
-        nacionalidad: meta.nacionalidad || 'Peruana',
-        celular: student.celular || meta.telefono_movil || '',
-        email_personal: student.email_personal || '',
-        direccion_domicilio: student.direccion_domicilio || meta.direccion_residencia || '',
-        departamento: meta.departamento || meta.ubigeo?.departamento || '',
-        provincia: meta.provincia || meta.ubigeo?.provincia || '',
-        distrito: meta.distrito || meta.ubigeo?.distrito || '',
-        contacto_emergencia_nombre: meta.emergencia?.contacto_nombre || meta.apoderado?.nombre || meta.contacto_emergencia_nombre || '',
-        contacto_emergencia_telefono: meta.emergencia?.contacto_telefono || meta.apoderado?.celular || meta.contacto_emergencia_telefono || '',
+        fecha_nacimiento: perfil.fechaNacimiento || '',
+        genero: perfil.genero || '',
+        estado_civil: perfil.estadoCivil || '',
+        nacionalidad: perfil.nacionalidad || '',
+        celular: perfil.celular || '',
+        email_personal: perfil.email || '',
+        direccion_domicilio: perfil.direccion || '',
+        departamento: perfil.departamento || '',
+        provincia: perfil.provincia || '',
+        distrito: perfil.distrito || '',
+        contacto_emergencia_nombre: perfil.contactoNombre || '',
+        contacto_emergencia_telefono: perfil.contactoTelefono || '',
       });
       setShowConfirmModal(false);
       setError(null);
@@ -323,10 +316,10 @@ export function EditStudentModal({ student, onClose, onUpdated }) {
       const meta = { ...(student.metadata_admision || {}) };
 
       // Empaquetar datos personales actualizados en metadata_admision
-      meta.genero = form.genero;
-      meta.sexo = form.genero;
-      meta.estado_civil = form.estado_civil;
-      meta.nacionalidad = form.nacionalidad;
+      // Solo se escriben los datos con valor: un campo "Sin registrar" no borra lo que hubiera.
+      if (form.genero) { meta.genero = form.genero; meta.sexo = form.genero; }
+      if (form.estado_civil) meta.estado_civil = form.estado_civil;
+      if (form.nacionalidad) meta.nacionalidad = form.nacionalidad;
       meta.departamento = form.departamento || null;
       meta.provincia = form.provincia || null;
       meta.distrito = form.distrito || null;

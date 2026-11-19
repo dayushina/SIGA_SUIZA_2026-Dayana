@@ -818,7 +818,7 @@ export function CoordinatorAcademic() {
                     .filter(p => String(p.id) !== String(selectedPeriod))
                     .map(p => (
                       <option key={p.id} value={p.id}>
-                        {p.nombre || p.codigo} {p.es_regular ? '(Regular)' : ''}
+                        {p.nombre || p.codigo}
                       </option>
                     ))
                   }

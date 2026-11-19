@@ -158,11 +158,6 @@ export function LoginForm() {
             </a>
           </div>
 
-          <div className="mt-10 p-4 rounded-xl text-center bg-slate-light border border-dashed border-slate-300">
-            <p className="text-slate-500 text-sm">
-              <strong className="text-navy">Modo Demo Activo:</strong> admin@siga.edu / admin123
-            </p>
-          </div>
         </div>
       </div>
     </div>

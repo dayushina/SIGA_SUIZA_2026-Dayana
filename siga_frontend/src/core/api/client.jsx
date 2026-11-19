@@ -19,7 +19,12 @@ class SIGAApiClient {
 
   async request(endpoint, options = {}) {
     const url = `${this.baseURL}${endpoint}`;
-    const { timeoutMs, ...fetchOptions } = options;
+    // `data` (objeto) se serializa como cuerpo JSON; fetch no conoce esa opcion
+    // y sin esto la peticion viajaba vacia (PUT/POST fallaban con 422).
+    const { timeoutMs, data, ...fetchOptions } = options;
+    if (data !== undefined && fetchOptions.body === undefined) {
+      fetchOptions.body = JSON.stringify(data);
+    }
     const controller = timeoutMs ? new AbortController() : null;
     const timeoutId = controller
       ? setTimeout(() => controller.abort(), timeoutMs)
