@@ -7,8 +7,11 @@ from database import get_db, OutboxEvent
 from models import Estudiante, Matricula, MatriculaDetalle
 from schemas import EstudianteCreate, EstudianteResponse, EstudianteUpdate, MatriculaCreate, MatriculaResponse, IngestaMasivaRequest
 from admision_normalizer import normalizar_admitido
+from autorizacion import ROLES_DESMATRICULAR, ROLES_ELIMINAR_ESTUDIANTE, exigir_rol, validar_motivo
+from domain import EstadoMatricula
 from datetime import datetime
 from typing import List, Optional
+from pydantic import BaseModel
 from pathlib import Path
 import uuid
 
@@ -665,13 +668,66 @@ async def actualizar_estudiante(estudiante_id: int, data: EstudianteUpdate, requ
     await db.refresh(db_estudiante)
     return db_estudiante
 
+# Historia que impide borrar a un estudiante: (tabla, condicion extra, descripcion)
+_HISTORIA_ESTUDIANTE = [
+    ("matriculas", "AND estado_matricula NOT IN ('anulada', 'anulada_por_reserva')",
+     "matrícula(s) vigente(s): desmatricúlelo primero"),
+    ("tesoreria_pagos", "AND estado = 'PAGADO'", "recibo(s) de caja vigente(s): anúlelos en Finanzas"),
+    ("evaluacion_registros", "", "registro(s) de notas"),
+    ("historial_academico", "", "evento(s) de historial académico"),
+    ("resoluciones_convalidacion", "", "convalidación(es)"),
+    ("registros_practicas", "", "registro(s) de prácticas"),
+    ("beneficios_estudiante", "", "beneficio(s) o beca(s)"),
+    ("solicitudes_tramites", "", "trámite(s)"),
+]
+
+
+async def _tabla_existe(db: AsyncSession, tabla: str) -> bool:
+    return bool((await db.execute(text(f"SELECT to_regclass('public.{tabla}') IS NOT NULL"))).scalar())
+
+
 @router.delete("/estudiantes/{estudiante_id}")
-async def eliminar_estudiante(estudiante_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Estudiante).where(Estudiante.id == estudiante_id))
-    db_estudiante = result.scalar_one_or_none()
+async def eliminar_estudiante(estudiante_id: int, request: Request, motivo: str = "", db: AsyncSession = Depends(get_db)):
+    """Elimina un estudiante registrado por error (solo superadmin).
+
+    Solo procede si no tiene historia vigente. Las matrículas y recibos ANULADOS
+    se eliminan con él; el evento de auditoría conserva sus datos.
+    """
+    actor = await exigir_rol(request, db, ROLES_ELIMINAR_ESTUDIANTE, "eliminar estudiantes")
+    motivo = validar_motivo(motivo)
+    db_estudiante = (await db.execute(
+        select(Estudiante).where(Estudiante.id == estudiante_id).with_for_update())).scalar_one_or_none()
     if not db_estudiante:
         raise HTTPException(status_code=404, detail="Estudiante no encontrado")
 
+    pendientes = []
+    for tabla, condicion, descripcion in _HISTORIA_ESTUDIANTE:
+        if not await _tabla_existe(db, tabla):
+            continue
+        n = (await db.execute(text(f"SELECT COUNT(*) FROM {tabla} WHERE estudiante_id = :id {condicion}"),
+                              {"id": estudiante_id})).scalar()
+        if n:
+            pendientes.append(f"{n} {descripcion}")
+    if pendientes:
+        raise HTTPException(status_code=409, detail="No se puede eliminar: tiene " + "; ".join(pendientes) + ".")
+
+    recibos_anulados = []
+    if await _tabla_existe(db, "tesoreria_pagos"):
+        recibos_anulados = [r[0] for r in (await db.execute(text(
+            "SELECT codigo_recibo FROM tesoreria_pagos WHERE estudiante_id = :id"), {"id": estudiante_id})).all()]
+        await db.execute(text("DELETE FROM tesoreria_pagos WHERE estudiante_id = :id"), {"id": estudiante_id})
+    await db.execute(text(
+        "DELETE FROM matricula_detalles WHERE matricula_id IN (SELECT id FROM matriculas WHERE estudiante_id = :id)"),
+        {"id": estudiante_id})
+    await db.execute(text("DELETE FROM matriculas WHERE estudiante_id = :id"), {"id": estudiante_id})
+
+    foto = db_estudiante.foto_url
+    snapshot = {
+        "id": estudiante_id, "codigo_estudiante": db_estudiante.codigo_estudiante, "dni": db_estudiante.dni,
+        "nombres": db_estudiante.nombres, "apellidos": db_estudiante.apellidos,
+        "programa_id": db_estudiante.programa_id, "recibos_anulados": recibos_anulados,
+        "motivo": motivo, "eliminado_por": actor.etiqueta,
+    }
     await db.delete(db_estudiante)
 
     event_payload = {
@@ -680,13 +736,14 @@ async def eliminar_estudiante(estudiante_id: int, request: Request, db: AsyncSes
         "source": "mod-gestion-academica",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "version": "1.0.0",
-        "data": {"id": estudiante_id},
+        "data": snapshot,
         "metadata": {"request_id": request.headers.get("X-Request-ID", "unknown")}
     }
-    
     db.add(OutboxEvent(event_type=event_payload["event_type"], payload=event_payload))
     await db.commit()
-    return {"message": "Estudiante eliminado"}
+    if foto and not str(foto).startswith("data:"):
+        _delete_foto(foto)
+    return {"message": f"Estudiante {snapshot['nombres']} {snapshot['apellidos']} eliminado."}
 
 @router.post("/matriculas/", response_model=MatriculaResponse, status_code=status.HTTP_201_CREATED)
 async def realizar_matricula(request: Request, data: MatriculaCreate, db: AsyncSession = Depends(get_db)):
@@ -696,7 +753,7 @@ async def realizar_matricula(request: Request, data: MatriculaCreate, db: AsyncS
         select(Matricula).where(
             Matricula.estudiante_id == data.estudiante_id,
             Matricula.periodo_id == data.periodo_id,
-            Matricula.estado_matricula != 'anulado'
+            Matricula.estado_matricula.notin_(list(EstadoMatricula.anuladas()))
         )
     )
     if existing.scalars().first():
@@ -751,7 +808,7 @@ async def obtener_estudiantes_por_unidad(unidad_id: int, periodo_id: int, db: As
         .join(MatriculaDetalle, MatriculaDetalle.matricula_id == Matricula.id)
         .where(Matricula.periodo_id == periodo_id)
         .where(MatriculaDetalle.unidad_didactica_id == unidad_id)
-        .where(Matricula.estado_matricula != "anulada")
+        .where(Matricula.estado_matricula.notin_(list(EstadoMatricula.anuladas())))
     )
     result = await db.execute(query)
     rows = result.all()
@@ -833,28 +890,75 @@ async def sincronizar_estudiantes_seccion(unidad_id: int, periodo_id: int, reque
     await db.commit()
     return await obtener_estudiantes_por_unidad(unidad_id, periodo_id, db)
 
-@router.delete("/matriculas/{matricula_id}")
-async def anular_matricula(matricula_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Matricula).where(Matricula.id == matricula_id))
-    db_matricula = result.scalar_one_or_none()
+async def _desmatricular(matricula_id: int, motivo: str, request: Request, db: AsyncSession) -> dict:
+    actor = await exigir_rol(request, db, ROLES_DESMATRICULAR, "desmatricular estudiantes")
+    motivo = validar_motivo(motivo)
+    db_matricula = (await db.execute(
+        select(Matricula).where(Matricula.id == matricula_id).with_for_update())).scalar_one_or_none()
     if not db_matricula:
         raise HTTPException(status_code=404, detail="Matrícula no encontrada")
+    if db_matricula.estado_matricula in EstadoMatricula.anuladas():
+        raise HTTPException(status_code=409, detail="La matrícula ya está anulada.")
+    if db_matricula.consolidada:
+        raise HTTPException(status_code=409, detail=(
+            "La matrícula ya tiene resultado final consolidado; no puede anularse. "
+            "Registre un retiro o reserva en el historial académico."))
+    con_notas = 0
+    if await _tabla_existe(db, "evaluacion_registros"):
+        con_notas = (await db.execute(text("""
+            SELECT COUNT(*) FROM evaluacion_registros er
+            JOIN matricula_detalles md ON md.id = er.matricula_detalle_id
+            WHERE md.matricula_id = :mid
+              AND (er.nota_c1 IS NOT NULL OR er.nota_c2 IS NOT NULL
+                   OR er.nota_c3 IS NOT NULL OR er.nota_final IS NOT NULL)
+        """), {"mid": matricula_id})).scalar()
+    if con_notas:
+        raise HTTPException(status_code=409, detail=(
+            f"La matrícula ya tiene {con_notas} registro(s) de notas; no puede anularse. "
+            "Registre un retiro de las unidades didácticas."))
 
-    db_matricula.estado_matricula = "anulada"
-    
+    db_matricula.estado_matricula = EstadoMatricula.ANULADA.value
+    db_matricula.anulada_motivo = motivo
+    db_matricula.anulada_por = actor.etiqueta
+    db_matricula.anulada_en = datetime.utcnow()
+
+    # Sin otra matricula vigente, el estudiante deja de figurar como matriculado.
+    otra = (await db.execute(select(Matricula.id).where(
+        Matricula.estudiante_id == db_matricula.estudiante_id, Matricula.id != matricula_id,
+        Matricula.estado_matricula.notin_(list(EstadoMatricula.anuladas()))))).first()
+    est = (await db.execute(select(Estudiante).where(Estudiante.id == db_matricula.estudiante_id))).scalar_one_or_none()
+    if est and not otra and est.estado_academico == "matriculado":
+        est.estado_academico = "ingresante" if (est.ciclo_actual or 1) <= 1 else "regular"
+
     event_payload = {
         "event_id": str(uuid.uuid4()),
         "event_type": "gestion_academica.matricula.anulada",
         "source": "mod-gestion-academica",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "version": "1.0.0",
-        "data": {"matricula_id": matricula_id, "estudiante_id": db_matricula.estudiante_id},
+        "data": {"matricula_id": matricula_id, "estudiante_id": db_matricula.estudiante_id,
+                 "periodo_id": db_matricula.periodo_id, "motivo": motivo, "anulada_por": actor.etiqueta},
         "metadata": {"request_id": request.headers.get("X-Request-ID", "unknown")}
     }
-    
     db.add(OutboxEvent(event_type=event_payload["event_type"], payload=event_payload))
     await db.commit()
-    return {"message": "Matrícula anulada correctamente"}
+    return {"message": "Matrícula anulada correctamente", "matricula_id": matricula_id}
+
+
+class DesmatriculaIn(BaseModel):
+    motivo: str
+
+
+@router.post("/matriculas/{matricula_id}/anular")
+async def anular_matricula(matricula_id: int, data: DesmatriculaIn, request: Request, db: AsyncSession = Depends(get_db)):
+    """Desmatricula: anula la matrícula (con motivo) conservando el registro."""
+    return await _desmatricular(matricula_id, data.motivo, request, db)
+
+
+@router.delete("/matriculas/{matricula_id}")
+async def anular_matricula_delete(matricula_id: int, request: Request, motivo: str = "", db: AsyncSession = Depends(get_db)):
+    """Compatibilidad: DELETE equivale a anular (?motivo=...)."""
+    return await _desmatricular(matricula_id, motivo, request, db)
 
 # ================================
 # FASE 4: TRAMITES Y CASUISTICAS

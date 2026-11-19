@@ -44,6 +44,10 @@ class Matricula(BaseModel):
     boleta_emitida_en = Column(TIMESTAMP)       # Fecha de emisión de la boleta
     consolidada = Column(Boolean, default=False)    # Ya pasó por "resultado final"
     registro_academico = Column(String(50))     # Código de registro académico
+    # Desmatrícula (anulación con trazabilidad)
+    anulada_motivo = Column(Text)
+    anulada_por = Column(String(150))
+    anulada_en = Column(TIMESTAMP)
 
     # Relación con el detalle de la matrícula (las UDs matriculadas)
     detalles = relationship("MatriculaDetalle", back_populates="matricula", cascade="all, delete-orphan")
@@ -168,6 +172,10 @@ class PagoCaja(BaseModel):
     estado = Column(String(20), default="PAGADO", index=True)
     fecha_pago = Column(TIMESTAMP, nullable=False)
     qr_contenido = Column(Text)                        # Datos del pago grabados en el QR al momento de cobrar
+    # Anulación (registro por error): el recibo se conserva para auditoría y correlativo
+    anulado_motivo = Column(Text)
+    anulado_por = Column(String(150))
+    anulado_en = Column(TIMESTAMP)
 
 class ConfiguracionCaja(BaseModel):
     __tablename__ = "tesoreria_configuracion"

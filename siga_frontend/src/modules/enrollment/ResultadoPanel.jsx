@@ -4,6 +4,10 @@ import { QRCodeSVG } from 'qrcode.react';
 import { apiClient, API_BASE } from '../../core/api/client';
 import { SectionInfoBlock } from './SectionInfoBlock';
 import { getPeriodLabelById } from './periodUtils';
+import { useAuth } from '../../core/auth/useAuth';
+import { useConfirm } from '../../core/ui/ConfirmModal';
+import { useToast } from '../../core/ui/ToastContext';
+import { puedeDesmatricular } from '../../core/auth/roles';
 
 const PASOS = [
   'Se consolida la matrícula y se genera el registro académico del ciclo.',
@@ -22,6 +26,11 @@ export function ResultadoPanel() {
   const [search, setSearch] = useState('');
   const [soloPendientes, setSoloPendientes] = useState(false);
   const [consolidando, setConsolidando] = useState(null);
+  const [anulando, setAnulando] = useState(null);
+  const { user } = useAuth();
+  const { promptModal } = useConfirm();
+  const toast = useToast();
+  const permiteDesmatricular = puedeDesmatricular(user);
 
   const [detalle, setDetalle] = useState(null); // { row, pasos }
   const [avance, setAvance] = useState(null);
@@ -71,6 +80,34 @@ export function ResultadoPanel() {
       setHistorial(hi);
     } finally {
       setLoadingDetalle(false);
+    }
+  };
+
+  // Desmatricular: anula la matricula (con motivo). El backend la bloquea si ya tiene notas.
+  const desmatricular = async (row) => {
+    const motivo = await promptModal({
+      title: `Desmatricular a ${row.nombres} ${row.apellidos}`,
+      message: `Se anulará su matrícula del periodo ${getPeriodLabelById(periods, row.periodo_id)}. `
+        + 'El registro se conserva para auditoría y el estudiante podrá volver a matricularse. '
+        + 'Si la matrícula se pagó por error, anule después el recibo en Finanzas.',
+      placeholder: 'Motivo (ej. matriculado por error, se retiró antes de iniciar)',
+      confirmText: 'Desmatricular',
+      type: 'danger',
+      required: true,
+    });
+    if (!motivo || !motivo.trim()) return;
+    setAnulando(row.matricula_id);
+    try {
+      const res = await apiClient.request(`/api/mod-gestion-academica/matriculas/${row.matricula_id}/anular`, {
+        method: 'POST',
+        data: { motivo: motivo.trim() },
+      });
+      toast.success(res?.message || 'Matrícula anulada.');
+      await cargar();
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setAnulando(null);
     }
   };
 
@@ -228,6 +265,16 @@ export function ResultadoPanel() {
                             className="px-3 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg disabled:opacity-50"
                           >
                             {consolidando === m.matricula_id ? 'Consolidando...' : 'Consolidar'}
+                          </button>
+                        )}
+                        {!m.consolidada && permiteDesmatricular && (
+                          <button
+                            onClick={() => desmatricular(m)}
+                            disabled={anulando === m.matricula_id}
+                            className="px-3 py-1.5 text-xs font-bold text-red-700 bg-red-50 hover:bg-red-600 hover:text-white rounded-lg disabled:opacity-50"
+                            title="Anular la matrícula registrada por error"
+                          >
+                            {anulando === m.matricula_id ? 'Anulando...' : 'Desmatricular'}
                           </button>
                         )}
                       </div>

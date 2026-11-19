@@ -76,6 +76,9 @@ async def ensure_schema():
         "ALTER TABLE matriculas ADD COLUMN IF NOT EXISTS boleta_emitida_en TIMESTAMP",
         "ALTER TABLE matriculas ADD COLUMN IF NOT EXISTS consolidada BOOLEAN DEFAULT FALSE",
         "ALTER TABLE matriculas ADD COLUMN IF NOT EXISTS registro_academico VARCHAR(50)",
+        "ALTER TABLE matriculas ADD COLUMN IF NOT EXISTS anulada_motivo TEXT",
+        "ALTER TABLE matriculas ADD COLUMN IF NOT EXISTS anulada_por VARCHAR(150)",
+        "ALTER TABLE matriculas ADD COLUMN IF NOT EXISTS anulada_en TIMESTAMP",
     ]
     async with engine.begin() as conn:
         for sentencia in sentencias:

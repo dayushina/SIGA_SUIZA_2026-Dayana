@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../../core/auth/useAuth';
 import { API_BASE } from '../../core/api/client';
 import { useToast } from '../../core/ui/ToastContext';
+import { useConfirm } from '../../core/ui/ConfirmModal';
+import { puedeAnularPagos } from '../../core/auth/roles';
 import { 
   Wallet, 
   Search, 
@@ -35,7 +37,8 @@ import {
   FileText,
   Eye,
   X,
-  Tags
+  Tags,
+  Ban
 } from 'lucide-react';
 import { PAYMENT_METHODS, CAREERS_MAP, useTupaCatalog, useCajaConfig, withCurrentConcept } from './tupaCatalog';
 import { PaymentModal } from './PaymentModal';
@@ -65,6 +68,9 @@ const findMatriculaReceipt = (transactions, student) =>
 export function FinancesDashboard() {
   const toast = useToast();
   const { user } = useAuth();
+  const { promptModal } = useConfirm();
+  const puedeAnular = puedeAnularPagos(user);
+  const [anulandoId, setAnulandoId] = useState(null);
   const [activeTab, setActiveTab] = useState('caja'); // 'caja' | 'historial' | 'arqueo' | 'tarifario'
 
   // Data states
@@ -371,6 +377,31 @@ export function FinancesDashboard() {
   };
 
   const exportFilteredHistory = () => handleExportExcel({ filtered: true });
+
+  // Anular un recibo registrado por error (queda en BD como ANULADO, con motivo y usuario)
+  const handleAnularPago = async (t) => {
+    const motivo = await promptModal({
+      title: `Anular recibo ${t.codigoRecibo}`,
+      message: `Se anulará el recibo de ${t.estudianteNombre} por S/ ${parseFloat(t.monto).toFixed(2)} (${t.conceptoNombre}). `
+        + 'Dejará de figurar en el libro diario y en el estado de cuenta; el registro se conserva para auditoría.'
+        + (t.liberaMatricula ? ' Como habilitó la matrícula, el alumno volverá a tener deuda de matrícula.' : ''),
+      placeholder: 'Motivo de la anulación (ej. cobro duplicado, alumno equivocado)',
+      confirmText: 'Anular recibo',
+      type: 'danger',
+      required: true,
+    });
+    if (!motivo || !motivo.trim()) return;
+    setAnulandoId(t.id);
+    try {
+      const res = await tesoreriaApi.anularPago(t.id, motivo.trim());
+      toast.success(res.message || 'Recibo anulado.');
+      await Promise.all([fetchTransactions(), fetchStudents()]);
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setAnulandoId(null);
+    }
+  };
 
   // Desglose por método de pago para Arqueo
   const arqueoPorMetodo = useMemo(() => {
@@ -1048,6 +1079,17 @@ export function FinancesDashboard() {
                             <Printer size={13} />
                             <span>Boleta</span>
                           </button>
+                          {puedeAnular && t.origen === 'caja' && (
+                            <button
+                              onClick={() => handleAnularPago(t)}
+                              disabled={anulandoId === t.id}
+                              className="ml-1.5 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-50 hover:bg-red-600 hover:text-white text-red-700 font-semibold text-xs transition cursor-pointer disabled:opacity-50"
+                              title="Anular recibo registrado por error"
+                            >
+                              <Ban size={13} />
+                              <span>{anulandoId === t.id ? 'Anulando…' : 'Anular'}</span>
+                            </button>
+                          )}
                         </td>
                       </tr>
                     ))

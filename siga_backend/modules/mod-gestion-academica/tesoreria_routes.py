@@ -33,7 +33,9 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import OutboxEvent, engine, get_db
-from models import ConceptoTupa, ConfiguracionCaja, Estudiante, PagoCaja
+from models import ConceptoTupa, ConfiguracionCaja, Estudiante, Matricula, PagoCaja
+from autorizacion import ROLES_ANULAR_PAGO, exigir_rol, validar_motivo
+from domain import EstadoMatricula
 
 router = APIRouter(prefix="/tesoreria")
 
@@ -232,7 +234,8 @@ def formato_token(token: str) -> str:
 async def asegurar_esquema_tesoreria():
     """Columnas agregadas después de crear las tablas (create_all no altera tablas existentes)."""
     async with engine.begin() as conn:
-        await conn.execute(text("ALTER TABLE IF EXISTS tesoreria_pagos ADD COLUMN IF NOT EXISTS qr_contenido TEXT"))
+        for columna in ("qr_contenido TEXT", "anulado_motivo TEXT", "anulado_por VARCHAR(150)", "anulado_en TIMESTAMP"):
+            await conn.execute(text(f"ALTER TABLE IF EXISTS tesoreria_pagos ADD COLUMN IF NOT EXISTS {columna}"))
 
 
 # ---------------------------------------------------------------------------
@@ -726,6 +729,57 @@ async def registrar_pago(data: PagoIn, request: Request, db: AsyncSession = Depe
     await db.commit()
     await db.refresh(pago)
     return {"pago": pago_dict(pago, secreto, await url_publica_qr(db)), "pagoMatricula": bool(est.pago_matricula)}
+
+
+class AnulacionIn(BaseModel):
+    motivo: str
+
+
+@router.post("/pagos/{pago_id}/anular")
+async def anular_pago(pago_id: int, data: AnulacionIn, request: Request, db: AsyncSession = Depends(get_db)):
+    """Anula un recibo registrado por error.
+
+    No se borra: queda con estado ANULADO, motivo, usuario y fecha (auditoría y
+    correlativo intactos). Deja de figurar en el libro diario, en el estado de
+    cuenta y en la verificación pública del QR.
+    """
+    actor = await exigir_rol(request, db, ROLES_ANULAR_PAGO, "anular boletas de caja")
+    motivo = validar_motivo(data.motivo)
+    pago = (await db.execute(select(PagoCaja).where(PagoCaja.id == pago_id).with_for_update())).scalar_one_or_none()
+    if not pago:
+        raise HTTPException(404, detail="Recibo no encontrado.")
+    if pago.estado != "PAGADO":
+        raise HTTPException(409, detail=f"El recibo {pago.codigo_recibo} ya está {pago.estado.lower()}.")
+
+    est = await estudiante_o_404(db, pago.estudiante_id)
+    pago_matricula = bool(est.pago_matricula)
+    if pago.libera_matricula:
+        otro_pago = (await db.execute(select(PagoCaja.id).where(
+            PagoCaja.estudiante_id == est.id, PagoCaja.estado == "PAGADO",
+            PagoCaja.libera_matricula.is_(True), PagoCaja.id != pago.id))).first()
+        if not otro_pago:
+            vigente = (await db.execute(select(Matricula.id).where(
+                Matricula.estudiante_id == est.id,
+                Matricula.estado_matricula.notin_(list(EstadoMatricula.anuladas()))))).first()
+            if vigente:
+                raise HTTPException(409, detail=(
+                    "Este recibo habilitó la matrícula y el estudiante tiene una matrícula vigente. "
+                    "Primero desmatricúlelo y luego anule el recibo."))
+            est.pago_matricula = False  # vuelve a tener deuda de matrícula
+            pago_matricula = False
+
+    pago.estado = "ANULADO"
+    pago.anulado_motivo = motivo
+    pago.anulado_por = actor.etiqueta
+    pago.anulado_en = ahora_peru()
+    publicar_evento(db, "tesoreria.pago.anulado", {
+        "codigo_recibo": pago.codigo_recibo, "estudiante_id": est.id, "dni": est.dni,
+        "concepto": pago.concepto_codigo, "monto": a_float(pago.monto),
+        "motivo": motivo, "anulado_por": actor.etiqueta,
+    }, request)
+    await db.commit()
+    return {"message": f"Recibo {pago.codigo_recibo} anulado.", "codigoRecibo": pago.codigo_recibo,
+            "pagoMatricula": pago_matricula}
 
 
 @router.get("/estudiantes/{estudiante_id}/estado-cuenta")

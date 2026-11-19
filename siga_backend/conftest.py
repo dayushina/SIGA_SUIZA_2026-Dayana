@@ -192,6 +192,15 @@ async def clean_test_db():
                 "planes_estudio",
                 "outbox_events",
             ]
+            # Tablas que dependen de estudiantes y pueden no existir en siga_test
+            opcionales = [
+                "tesoreria_pagos", "solicitudes_tramites", "beneficios_estudiante",
+                "historial_academico", "registros_practicas",
+                "convalidaciones_detalle", "resoluciones_convalidacion",
+            ]
+            for tbl in opcionales:
+                if await conn.scalar(text(f"SELECT to_regclass('public.{tbl}') IS NOT NULL")):
+                    await conn.execute(text(f"DELETE FROM {tbl};"))
             for tbl in delete_tables:
                 await conn.execute(text(f"DELETE FROM {tbl};"))
             await conn.commit()

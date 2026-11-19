@@ -3,7 +3,7 @@ import os
 from routes import router
 from matricula_routes import router as matricula_router
 from tesoreria_routes import router as tesoreria_router, asegurar_esquema_tesoreria
-from database import init_db
+from database import init_db, ensure_schema
 import asyncio
 from outbox_worker import outbox_worker
 
@@ -35,6 +35,7 @@ async def get_manifest():
 @app.on_event("startup")
 async def startup():
     await init_db()
+    await ensure_schema()  # columnas agregadas a tablas existentes (antes nunca se invocaba)
     await asegurar_esquema_tesoreria()
     asyncio.create_task(outbox_worker())
 

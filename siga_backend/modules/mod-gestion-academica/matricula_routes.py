@@ -920,7 +920,7 @@ async def validar_boleta(codigo: str, db: AsyncSession = Depends(get_db)):
     )).scalar_one_or_none()
 
     return {
-        "valida": matricula.estado_matricula != EstadoMatricula.ANULADA.value,
+        "valida": matricula.estado_matricula not in EstadoMatricula.anuladas(),
         "boleta": _boleta_payload(matricula),
         "estudiante": {
             "id": estud.id, "codigo_estudiante": estud.codigo_estudiante,

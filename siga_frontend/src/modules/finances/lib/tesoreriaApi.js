@@ -50,6 +50,8 @@ export const tesoreriaApi = {
 
   listarPagos: () => request('/pagos'),
   registrarPago: (payload) => request('/pagos', { method: 'POST', body: payload }),
+  // Registro por error: el recibo queda ANULADO (con motivo y usuario), no se borra.
+  anularPago: (id, motivo) => request(`/pagos/${id}/anular`, { method: 'POST', body: { motivo } }),
   estadoCuenta: (estudianteId) => request(`/estudiantes/${estudianteId}/estado-cuenta`),
 
   importar: (payload) => request('/importar', { method: 'POST', body: payload }),
