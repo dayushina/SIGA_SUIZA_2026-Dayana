@@ -17,6 +17,7 @@ import { RestriccionesPanel } from './RestriccionesPanel';
 import { ResultadoPanel } from './ResultadoPanel';
 import ExtraordinaryEnrollmentModal from './ExtraordinaryEnrollmentModal';
 import { SectionInfoBlock } from './SectionInfoBlock';
+import { useBajasEstudiante } from '../students/useBajasEstudiante';
 import './enrollmentPremium.css';
 
 export function EnrollmentDashboard() {
@@ -25,6 +26,7 @@ export function EnrollmentDashboard() {
   const primaryRole = user?.is_superuser ? 'superadmin' : (userRoles.length > 0 ? userRoles[0] : (user?.role || 'invitado'));
   const userRole = primaryRole;
   const [students, setStudents] = useState([]);
+  const bajas = useBajasEstudiante();
   const [loading, setLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [view, setView] = useState('list'); // 'list', 'process' or 'diagram'
@@ -282,13 +284,28 @@ export function EnrollmentDashboard() {
                         {student.estado_academico}
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-right">
-                      <button 
-                        className="px-4 py-1.5 text-sm font-semibold text-primary bg-primary/10 hover:bg-primary/20 rounded-lg transition-colors"
-                        onClick={() => handleEnrollClick(student)}
-                      >
-                        Matricular
-                      </button>
+                    <td className="py-3 px-4 text-right whitespace-nowrap">
+                      <div className="flex justify-end gap-2">
+                        <button
+                          className="px-4 py-1.5 text-sm font-semibold text-primary bg-primary/10 hover:bg-primary/20 rounded-lg transition-colors"
+                          onClick={() => handleEnrollClick(student)}
+                        >
+                          Matricular
+                        </button>
+                        {bajas.puedeDesmatricular && student.matricula_vigente && !student.matricula_vigente.consolidada && (
+                          <button
+                            className="px-4 py-1.5 text-sm font-semibold text-red-700 bg-red-50 hover:bg-red-600 hover:text-white border border-red-200 rounded-lg transition-colors disabled:opacity-50"
+                            disabled={bajas.desmatriculando(student.matricula_vigente.id)}
+                            title="Anular la matrícula vigente registrada por error"
+                            onClick={async () => {
+                              const m = student.matricula_vigente;
+                              if (await bajas.desmatricular(student, m, `${m.periodo_id}`)) fetchStudents(searchTerm);
+                            }}
+                          >
+                            {bajas.desmatriculando(student.matricula_vigente.id) ? 'Anulando…' : 'Desmatricular'}
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))

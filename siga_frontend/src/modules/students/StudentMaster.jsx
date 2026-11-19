@@ -4,8 +4,7 @@ import { useAuth } from '../../core/auth/useAuth';
 import { API_BASE } from '../../core/api/client';
 import { PROGRAMAS_ESTUDIANTE_LISTA } from '../../core/constants/programas';
 import { useToast } from '../../core/ui/ToastContext';
-import { useConfirm } from '../../core/ui/ConfirmModal';
-import { puedeEliminarEstudiantes } from '../../core/auth/roles';
+import { useBajasEstudiante } from './useBajasEstudiante';
 import techBg from '../../assets/tech-bg.jpg';
 import { EditStudentModal } from './EditStudentModal';
 import { StudentDetail } from './StudentDetail';
@@ -527,9 +526,7 @@ function ProgramaFilter({ value, onChange }) {
 export function StudentMaster() {
   const { user } = useAuth();
   const toast = useToast();
-  const { promptModal } = useConfirm();
-  const permiteEliminar = puedeEliminarEstudiantes(user);
-  const [eliminandoId, setEliminandoId] = useState(null);
+  const bajas = useBajasEstudiante();
   const userRoles = user?.roles ? user.roles.map(r => typeof r === 'string' ? r : r.nombre || r.name) : [];
   const primaryRole = user?.is_superuser ? 'superadmin' : (userRoles.length > 0 ? userRoles[0] : (user?.role || 'invitado'));
   const userRole = primaryRole;
@@ -627,35 +624,11 @@ export function StudentMaster() {
     };
   }, [showModal]);
 
-  // Eliminar un estudiante registrado por error. El backend solo lo permite si no tiene
-  // historia vigente (matrícula, recibos, notas...) y responde qué falta resolver.
+  // Eliminar un estudiante registrado por error (el backend exige que no tenga historia vigente).
   const handleEliminarEstudiante = async (s) => {
-    const motivo = await promptModal({
-      title: `Eliminar a ${s.nombres} ${s.apellidos}`,
-      message: `DNI ${s.dni} · ${s.codigo_estudiante}. Esta acción es definitiva. `
-        + 'Solo procede si el estudiante no tiene matrícula vigente, recibos vigentes ni notas: '
-        + 'desmatricúlelo y anule sus recibos antes. Queda registro de auditoría.',
-      placeholder: 'Motivo (ej. registro duplicado, DNI equivocado)',
-      confirmText: 'Eliminar estudiante',
-      type: 'danger',
-      required: true,
-    });
-    if (!motivo || !motivo.trim()) return;
-    setEliminandoId(s.id);
-    try {
-      const res = await fetch(
-        `${API_BASE}/api/mod-gestion-academica/estudiantes/${s.id}?motivo=${encodeURIComponent(motivo.trim())}`,
-        { method: 'DELETE', headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } },
-      );
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `Error ${res.status}`);
-      toast.success(data.message || 'Estudiante eliminado.');
+    if (await bajas.eliminar(s)) {
       if (selectedStudent?.id === s.id) setSelectedStudent(null);
       handleSearch(searchTerm);
-    } catch (e) {
-      toast.error(e.message);
-    } finally {
-      setEliminandoId(null);
     }
   };
 
@@ -1440,7 +1413,7 @@ export function StudentMaster() {
                 <th className="py-3.5 px-4">DNI / Contacto</th>
                 <th className="py-3.5 px-4 text-center">Estado Académico</th>
                 <th className="py-3.5 px-4 text-center">Expediente / Pago</th>
-                <th className="py-3.5 px-5 text-right">Acciones</th>
+                <th className="py-3.5 px-5 text-right sticky right-0 z-10 bg-slate-100 shadow-[-8px_0_12px_-10px_rgba(15,23,42,0.35)]">Acciones</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-sm">
@@ -1573,7 +1546,7 @@ export function StudentMaster() {
                       </td>
 
                       {/* Columna Acciones */}
-                      <td className="py-3.5 px-5 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                      <td className="py-3.5 px-5 text-right whitespace-nowrap sticky right-0 z-[1] bg-white group-hover:bg-slate-50 shadow-[-8px_0_12px_-10px_rgba(15,23,42,0.35)]" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center justify-end gap-2">
                           <button
                             type="button"
@@ -1593,16 +1566,16 @@ export function StudentMaster() {
                             <Pencil size={13} />
                             <span>Editar</span>
                           </button>
-                          {permiteEliminar && (
+                          {bajas.puedeEliminar && (
                             <button
                               type="button"
                               onClick={() => handleEliminarEstudiante(s)}
-                              disabled={eliminandoId === s.id}
+                              disabled={bajas.eliminando(s.id)}
                               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-extrabold text-red-700 bg-red-50 hover:bg-red-600 hover:text-white border border-red-200 transition-all shadow-xs disabled:opacity-50"
                               title="Eliminar estudiante registrado por error"
                             >
                               <Trash2 size={13} />
-                              <span>{eliminandoId === s.id ? 'Eliminando…' : 'Eliminar'}</span>
+                              <span>{bajas.eliminando(s.id) ? 'Eliminando…' : 'Eliminar'}</span>
                             </button>
                           )}
                         </div>
@@ -1807,6 +1780,7 @@ export function StudentMaster() {
         <StudentDetail
           student={selectedStudent}
           onClose={() => setSelectedStudent(null)}
+          onChanged={() => handleSearch(searchTerm)}
         />
       )}
     </div>

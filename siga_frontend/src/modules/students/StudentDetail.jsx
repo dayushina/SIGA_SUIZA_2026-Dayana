@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { API_BASE } from '../../core/api/client';
+import { useBajasEstudiante } from './useBajasEstudiante';
 import { PROGRAMAS_ESTUDIANTE } from '../../core/constants/programas';
 import { readStudentProfile } from './studentMetadata';
 import techBg from '../../assets/tech-bg.jpg';
@@ -10,7 +11,9 @@ import {
   FileText, CreditCard, Award, BadgeCheck, User, Building2,
   GraduationCap, Clock, School, HeartPulse, Shield, Home,
   Briefcase, Wifi, AlertTriangle, CheckCircle2, FileCheck2,
-  Users, AlertCircle, Info, Sparkles, DollarSign, Activity
+  Users, AlertCircle, Info, Sparkles, DollarSign, Activity,
+  Trash2,
+  Ban,
 } from 'lucide-react';
 
 // Edad exacta en años cumplidos (considera si ya pasó el cumpleaños este año).
@@ -112,7 +115,12 @@ function EmptyState({ icon: Icon, title, description }) {
   );
 }
 
-export function StudentDetail({ student, onClose }) {
+const ESTADOS_ANULADOS = ['anulada', 'anulada_por_reserva'];
+
+// onChanged: avisa al listado que hubo una baja (desmatricula / eliminacion) para recargarlo.
+export function StudentDetail({ student, onClose, onChanged }) {
+  const bajas = useBajasEstudiante();
+  const [reloadKey, setReloadKey] = useState(0);
   const [detail, setDetail] = useState(null);
   const [matriculas, setMatriculas] = useState([]);
   const [beneficios, setBeneficios] = useState([]);
@@ -177,7 +185,21 @@ export function StudentDetail({ student, onClose }) {
 
     fetchAll();
     return () => { cancelled = true; };
-  }, [student?.id]);
+  }, [student?.id, reloadKey]);
+
+  const handleDesmatricular = async (m) => {
+    if (await bajas.desmatricular(detail || student, m, `${m.periodo_id}`)) {
+      setReloadKey(k => k + 1);
+      onChanged?.();
+    }
+  };
+
+  const handleEliminar = async () => {
+    if (await bajas.eliminar(detail || student)) {
+      onChanged?.();
+      onClose();
+    }
+  };
 
   useEffect(() => {
     if (!student) return;
@@ -578,6 +600,7 @@ export function StudentDetail({ student, onClose }) {
                             <th className="py-3 px-4">Tipo Ingreso</th>
                             <th className="py-3 px-4 text-center">Estado</th>
                             <th className="py-3 px-4 text-right">Carga</th>
+                            {bajas.puedeDesmatricular && <th className="py-3 px-4 text-right">Acción</th>}
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100 text-sm">
@@ -587,15 +610,39 @@ export function StudentDetail({ student, onClose }) {
                               <td className="py-3 px-4 text-slate-700 font-semibold">{PROGRAMAS[m.programa_id] || `Programa ${m.programa_id}`}</td>
                               <td className="py-3 px-4 text-slate-600 font-bold">{m.tipo_ingreso}</td>
                               <td className="py-3 px-4 text-center">
-                                <span className={`inline-flex px-2.5 py-0.5 rounded-full text-xs font-black uppercase ${
-                                  m.estado_matricula === 'activa' ? 'bg-emerald-100 text-emerald-800' : m.estado_matricula === 'pendiente' ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-700'
-                                }`}>
+                                <span
+                                  className={`inline-flex px-2.5 py-0.5 rounded-full text-xs font-black uppercase ${
+                                    m.estado_matricula === 'confirmada' ? 'bg-emerald-100 text-emerald-800'
+                                      : m.estado_matricula === 'pendiente' ? 'bg-amber-100 text-amber-800'
+                                        : ESTADOS_ANULADOS.includes(m.estado_matricula) ? 'bg-red-100 text-red-700'
+                                          : 'bg-slate-100 text-slate-700'
+                                  }`}
+                                  title={m.anulada_motivo ? `Motivo: ${m.anulada_motivo} · ${m.anulada_por || ''}` : undefined}
+                                >
                                   {m.estado_matricula}
                                 </span>
                               </td>
                               <td className="py-3 px-4 text-right font-mono font-bold text-slate-500">
                                 {m.detalles?.length || 0} UDs
                               </td>
+                              {bajas.puedeDesmatricular && (
+                                <td className="py-3 px-4 text-right">
+                                  {!ESTADOS_ANULADOS.includes(m.estado_matricula) && !m.consolidada ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDesmatricular(m)}
+                                      disabled={bajas.desmatriculando(m.id)}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-extrabold text-red-700 bg-red-50 hover:bg-red-600 hover:text-white border border-red-200 transition disabled:opacity-50 cursor-pointer"
+                                      title="Anular esta matrícula registrada por error"
+                                    >
+                                      <Ban size={13} />
+                                      {bajas.desmatriculando(m.id) ? 'Anulando…' : 'Desmatricular'}
+                                    </button>
+                                  ) : (
+                                    <span className="text-xs text-slate-400">{m.consolidada ? 'Consolidada' : '—'}</span>
+                                  )}
+                                </td>
+                              )}
                             </tr>
                           ))}
                         </tbody>
@@ -732,13 +779,26 @@ export function StudentDetail({ student, onClose }) {
             <span>Expediente oficial institucional del Sistema Integrado de Gestión Académica (SIGA).</span>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-6 py-2.5 rounded-xl bg-primary hover:bg-primary-dark text-white font-black text-sm transition-all shadow-md shadow-primary/30 cursor-pointer flex items-center gap-2"
-          >
-            <X size={16} /> Cerrar Ficha
-          </button>
+          <div className="flex items-center gap-2">
+            {bajas.puedeEliminar && (
+              <button
+                type="button"
+                onClick={handleEliminar}
+                disabled={bajas.eliminando(student.id)}
+                className="px-4 py-2.5 rounded-xl bg-red-50 hover:bg-red-600 text-red-700 hover:text-white border border-red-200 font-black text-sm transition-all cursor-pointer flex items-center gap-2 disabled:opacity-50"
+                title="Eliminar estudiante registrado por error"
+              >
+                <Trash2 size={16} /> {bajas.eliminando(student.id) ? 'Eliminando…' : 'Eliminar estudiante'}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-6 py-2.5 rounded-xl bg-primary hover:bg-primary-dark text-white font-black text-sm transition-all shadow-md shadow-primary/30 cursor-pointer flex items-center gap-2"
+            >
+              <X size={16} /> Cerrar Ficha
+            </button>
+          </div>
         </div>
 
       </div>

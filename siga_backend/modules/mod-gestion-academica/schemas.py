@@ -80,6 +80,11 @@ class MatriculaCreate(MatriculaBase):
 class MatriculaResponse(MatriculaBase):
     id: int
     estado_matricula: str
+    ciclo: Optional[int] = None
+    consolidada: Optional[bool] = False
+    anulada_motivo: Optional[str] = None
+    anulada_por: Optional[str] = None
+    anulada_en: Optional[datetime] = None
     detalles: List[MatriculaDetalleResponse] = []
     model_config = ConfigDict(from_attributes=True)
 

@@ -13,7 +13,10 @@ from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel
 from pathlib import Path
+import logging
 import uuid
+
+logger = logging.getLogger("mod-gestion-academica.routes")
 
 router = APIRouter()
 
@@ -208,14 +211,29 @@ async def crear_estudiante(request: Request, data: EstudianteCreate, db: AsyncSe
 
 @router.get("/estudiantes/")
 async def obtener_estudiantes(programa_id: Optional[int] = None, db: AsyncSession = Depends(get_db)):
-    import traceback
     try:
         query = select(Estudiante).order_by(Estudiante.apellidos)
         if programa_id is not None:
             query = query.where(Estudiante.programa_id == programa_id)
         result = await db.execute(query)
         rows = result.scalars().all()
-        print(f"[DEBUG] Estudiantes encontrados: {len(rows)}")
+
+        # Matricula vigente (la mas reciente no anulada) de cada estudiante: permite
+        # mostrar "Desmatricular" en las listas sin una consulta por fila.
+        vigentes = {}
+        if rows:
+            res_mat = await db.execute(
+                select(Matricula.id, Matricula.estudiante_id, Matricula.periodo_id, Matricula.ciclo,
+                       Matricula.consolidada, Matricula.estado_matricula)
+                .where(Matricula.estudiante_id.in_([r.id for r in rows]))
+                .where(Matricula.estado_matricula.notin_(list(EstadoMatricula.anuladas())))
+                .order_by(Matricula.created_at.desc(), Matricula.id.desc())
+            )
+            for m in res_mat.all():
+                vigentes.setdefault(m.estudiante_id, {
+                    "id": m.id, "periodo_id": m.periodo_id, "ciclo": m.ciclo,
+                    "consolidada": bool(m.consolidada), "estado": m.estado_matricula,
+                })
         return [
             {
                 "id": r.id,
@@ -236,13 +254,15 @@ async def obtener_estudiantes(programa_id: Optional[int] = None, db: AsyncSessio
                 "fecha_limite_documentos": r.fecha_limite_documentos.isoformat() if r.fecha_limite_documentos else None,
                 "modalidad_admision": r.modalidad_admision,
                 "metadata_admision": r.metadata_admision or {},
+                "matricula_vigente": vigentes.get(r.id),
             }
             for r in rows
         ]
-    except Exception as e:
-        tb = traceback.format_exc()
-        print(f"[ERROR] obtener_estudiantes: {e}\n{tb}")
-        return {"error": str(e), "type": type(e).__name__, "traceback": tb}
+    except Exception:
+        # Antes devolvia la traza del servidor con HTTP 200 (fuga de informacion
+        # y el frontend lo trataba como una lista valida).
+        logger.exception("obtener_estudiantes fallo")
+        raise HTTPException(status_code=500, detail="No se pudo obtener la lista de estudiantes.")
 
 @router.get("/estudiantes/siguiente-codigo")
 async def obtener_siguiente_codigo(db: AsyncSession = Depends(get_db)):

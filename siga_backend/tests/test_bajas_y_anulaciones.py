@@ -124,11 +124,20 @@ async def test_flujo_completo_desmatricular_anular_y_eliminar(client, datos):
     assert r.status_code == 409
     assert "matrícula" in r.json()["detail"] and "recibo" in r.json()["detail"]
 
+    # La lista de estudiantes expone la matricula vigente (habilita "Desmatricular" en pantalla)
+    lista = {e["id"]: e for e in (await client.get("/estudiantes/", headers=h(SECRETARIA))).json()}
+    assert lista[EST_A]["matricula_vigente"]["id"] == MAT_A
+    assert lista[EST_LIMPIO]["matricula_vigente"] is None
+
     # 1. Desmatricular (motivo obligatorio)
     r = await client.post(f"/matriculas/{MAT_A}/anular", json={"motivo": "x"}, headers=h(SECRETARIA))
     assert r.status_code == 400
     r = await client.post(f"/matriculas/{MAT_A}/anular", json={"motivo": "matriculado por error"}, headers=h(SECRETARIA))
     assert r.status_code == 200, r.text
+    lista = {e["id"]: e for e in (await client.get("/estudiantes/", headers=h(SECRETARIA))).json()}
+    assert lista[EST_A]["matricula_vigente"] is None
+    hist = (await client.get(f"/matriculas/estudiante/{EST_A}", headers=h(SECRETARIA))).json()
+    assert hist[0]["estado_matricula"] == "anulada" and hist[0]["anulada_motivo"] == "matriculado por error"
     fila = (await db.execute(text(
         "SELECT estado_matricula, anulada_motivo, anulada_por FROM matriculas WHERE id = :id"), {"id": MAT_A})).one()
     assert fila == ("anulada", "matriculado por error", "user5@siga.test")
