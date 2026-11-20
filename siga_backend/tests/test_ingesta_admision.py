@@ -101,3 +101,49 @@ async def test_ingesta_crea_nuevos_omite_existentes_y_carreras_inexistentes(clie
     r = await client.post("/admision/ingesta", json={"admitidos": lote}, headers=h(SUPERADMIN))
     assert r.json()["estudiantes_creados"] == 0
     assert r.json()["ya_existentes"] == 2
+
+
+@pytest.mark.asyncio
+async def test_ingesta_registra_carrera_oficial_sin_plan_y_avisa(client, datos):
+    """Una carrera del catalogo oficial sin fila en programas_estudio no bloquea la carga masiva."""
+    lote = [_admitido("80500000", 7, "ELECTRICIDAD INDUSTRIAL"), _admitido("80600000", 2)]
+    r = await client.post("/admision/ingesta", json={"admitidos": lote}, headers=h(SUPERADMIN))
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["estudiantes_creados"] == 2
+    assert body["sin_programa"] == []
+    assert body["programas_sin_plan"] == [7]
+    assert body["creados_por_programa"] == {"2": 1, "7": 1}
+    assert (await datos.execute(text(
+        "SELECT programa_id FROM estudiantes WHERE dni = '80500000'"))).scalar() == 7
+
+
+@pytest.mark.asyncio
+async def test_ingesta_avisa_catalogo_desalineado(client, datos):
+    """Si el id oficial lo ocupa otra carrera (BD sin unificar) se registra igual y se avisa."""
+    await datos.execute(text("""
+        INSERT INTO programas_estudio (id, nombre, codigo, duracion_periodos, creditos_totales, modalidad, estado,
+                                       created_at, updated_at)
+        VALUES (6, 'DESARROLLO DE SISTEMAS DE INFORMACION', 'T-DSI', 6, 0, 'presencial', 'activo', NOW(), NOW())
+    """))
+    await datos.commit()
+    r = await client.post("/admision/ingesta", json={"admitidos": [
+        _admitido("81000000", 6, "MECATRÓNICA AUTOMOTRIZ"), _admitido("81100000", 2)]}, headers=h(SUPERADMIN))
+    body = r.json()
+    assert body["estudiantes_creados"] == 2
+    assert body["programas_desalineados"] == [
+        {"id": 6, "esperado": "MECATRONICA AUTOMOTRIZ", "en_bd": "DESARROLLO DE SISTEMAS DE INFORMACION"}]
+
+
+@pytest.mark.asyncio
+async def test_ingesta_fila_invalida_no_tumba_el_lote(client, datos):
+    malo = _admitido("80700000")
+    malo["nombres"] = "X" * 150  # excede VARCHAR(100)
+    lote = [_admitido("80800000"), malo, _admitido("80900000")]
+    r = await client.post("/admision/ingesta", json={"admitidos": lote}, headers=h(SUPERADMIN))
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["estudiantes_creados"] == 2
+    assert [e["dni"] for e in body["con_error"]] == ["80700000"]
+    assert (await datos.execute(text(
+        "SELECT count(*) FROM estudiantes WHERE dni IN ('80800000','80900000')"))).scalar() == 2

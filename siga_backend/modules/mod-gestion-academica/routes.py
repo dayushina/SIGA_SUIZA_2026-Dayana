@@ -14,6 +14,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 from pathlib import Path
 import logging
+import unicodedata
 import uuid
 
 logger = logging.getLogger("mod-gestion-academica.routes")
@@ -116,6 +117,43 @@ async def eliminar_foto(estudiante_id: int, request: Request, db: AsyncSession =
     await db.refresh(db_estudiante)
     return db_estudiante
 
+# Ids del catalogo oficial de carreras (siga_frontend/src/core/constants/programas.js,
+# mod-admision/admision_excel.py y scripts/unificar_programas.py).
+PROGRAMAS_OFICIALES = {
+    1: "DESARROLLO DE SISTEMAS DE INFORMACION",
+    2: "ENFERMERIA TECNICA",
+    4: "GESTION ADMINISTRATIVA",
+    5: "CONTABILIDAD",
+    6: "MECATRONICA AUTOMOTRIZ",
+    7: "ELECTRICIDAD INDUSTRIAL",
+    8: "ADMINISTRACION DE OPERACIONES TURISTICAS",
+    9: "CONSTRUCCION CIVIL",
+    10: "PRODUCCION AGROPECUARIA",
+    11: "MANEJO FORESTAL",
+}
+PROGRAMAS_OFICIALES_IDS = frozenset(PROGRAMAS_OFICIALES)
+
+
+def _norm_nombre(texto) -> str:
+    t = unicodedata.normalize("NFKD", str(texto or ""))
+    return " ".join("".join(ch for ch in t if not unicodedata.combining(ch)).upper().split())
+
+
+async def _sincronizar_secuencia_id(db: AsyncSession, tabla: str) -> None:
+    """Adelanta la secuencia de `tabla.id` si quedo por detras del MAX(id).
+
+    Pasa tras restaurar respaldos o insertar filas con id explicito; sin esto cada
+    INSERT choca con la PK (estudiantes_pkey) y la carga masiva falla.
+    """
+    seq = (await db.execute(text("SELECT pg_get_serial_sequence(:t, 'id')"), {"t": tabla})).scalar()
+    if not seq:
+        return
+    await db.execute(
+        text(f"SELECT setval(:seq, GREATEST((SELECT COALESCE(MAX(id), 0) FROM {tabla}), nextval(:seq)))"),
+        {"seq": seq},
+    )
+
+
 @router.post("/admision/ingesta", status_code=status.HTTP_202_ACCEPTED)
 async def ingesta_admitidos(request: Request, data: IngestaMasivaRequest, db: AsyncSession = Depends(get_db)):
     """
@@ -127,9 +165,19 @@ async def ingesta_admitidos(request: Request, data: IngestaMasivaRequest, db: As
     estudiantes_creados = 0
     ya_existentes = 0
     sin_programa = []
+    con_error = []
+    creados_por_programa = {}
 
-    # Solo se aceptan carreras que existan en el catalogo (evita estudiantes huerfanos).
-    programas_validos = set((await db.execute(text("SELECT id FROM programas_estudio"))).scalars().all())
+    # estudiantes.programa_id usa el catalogo OFICIAL (mismo que el frontend y Admision).
+    # Se acepta cualquier carrera oficial aunque aun no tenga fila/malla en programas_estudio:
+    # el estudiante se registra igual y solo se avisa (la malla se importa aparte).
+    for tabla in ("estudiantes", "outbox_events"):  # nombres fijos, no vienen del cliente
+        await _sincronizar_secuencia_id(db, tabla)
+
+    catalogo_bd = {pid: nombre for pid, nombre in
+                   (await db.execute(text("SELECT id, nombre FROM programas_estudio"))).all()}
+    programas_en_bd = set(catalogo_bd)
+    programas_validos = programas_en_bd | PROGRAMAS_OFICIALES_IDS
     dnis_existentes = set((await db.execute(
         select(Estudiante.dni).where(Estudiante.dni.in_([a.dni for a in data.admitidos]))
     )).scalars().all()) if data.admitidos else set()
@@ -152,24 +200,35 @@ async def ingesta_admitidos(request: Request, data: IngestaMasivaRequest, db: As
         year = datetime.now().year
         codigo = f"{year}-{admitido.dni}"
         
-        # 2. Crear Estudiante (normalizando la fila cruda del Excel de Admision)
-        datos = normalizar_admitido(admitido.metadata_completa, admitido.fecha_nacimiento)
-        db_estudiante = Estudiante(
-            codigo_estudiante=codigo,
-            dni=admitido.dni,
-            nombres=admitido.nombres,
-            apellidos=admitido.apellidos,
-            programa_id=admitido.programa_id,
-            celular=admitido.celular,
-            email_personal=admitido.email_personal,
-            fecha_nacimiento=datos["fecha_nacimiento"],
-            direccion_domicilio=datos["direccion"],
-            modalidad_admision=admitido.modalidad,
-            metadata_admision=datos["metadata"]
-        )
-        db.add(db_estudiante)
-        await db.flush() # para obtener el ID
-        
+        # 2. Crear Estudiante (normalizando la fila cruda del Excel de Admision).
+        # Cada alumno va en su propio SAVEPOINT: una fila invalida no tumba el lote.
+        try:
+            async with db.begin_nested():
+                datos = normalizar_admitido(admitido.metadata_completa, admitido.fecha_nacimiento)
+                db_estudiante = Estudiante(
+                    codigo_estudiante=codigo,
+                    dni=admitido.dni,
+                    nombres=admitido.nombres,
+                    apellidos=admitido.apellidos,
+                    programa_id=admitido.programa_id,
+                    celular=admitido.celular,
+                    email_personal=admitido.email_personal,
+                    fecha_nacimiento=datos["fecha_nacimiento"],
+                    direccion_domicilio=datos["direccion"],
+                    modalidad_admision=admitido.modalidad,
+                    metadata_admision=datos["metadata"]
+                )
+                db.add(db_estudiante)
+                await db.flush() # para obtener el ID
+        except Exception as exc:  # noqa: BLE001 - se informa por fila
+            logger.warning("Ingesta de Admision: DNI %s no se pudo registrar: %s", admitido.dni, exc)
+            con_error.append({
+                "dni": admitido.dni,
+                "nombre": f"{admitido.nombres} {admitido.apellidos}".strip(),
+                "error": str(getattr(exc, "orig", exc)).splitlines()[0][:200],
+            })
+            continue
+
         # 3. Disparar evento para matricular en Ciclo I automáticamente
         # y para que mod-usuarios le cree su cuenta
         event_payload = {
@@ -192,16 +251,32 @@ async def ingesta_admitidos(request: Request, data: IngestaMasivaRequest, db: As
         
         db.add(OutboxEvent(event_type=event_payload["event_type"], payload=event_payload))
         estudiantes_creados += 1
-        
+        creados_por_programa[admitido.programa_id] = creados_por_programa.get(admitido.programa_id, 0) + 1
+
     await db.commit()
     if sin_programa:
-        logger.warning("Ingesta de Admision: %d admitidos omitidos por carrera inexistente en programas_estudio",
-                       len(sin_programa))
+        logger.warning("Ingesta de Admision: %d admitidos sin carrera reconocida", len(sin_programa))
+    # Carreras con alumnos registrados pero sin fila en programas_estudio (falta importar su malla).
+    programas_sin_plan = sorted(pid for pid in creados_por_programa if pid not in programas_en_bd)
+    # Id oficial ocupado por OTRA carrera en programas_estudio (catalogo sin unificar):
+    # se corrige con scripts/unificar_programas.py.
+    programas_desalineados = [
+        {"id": pid, "esperado": PROGRAMAS_OFICIALES[pid], "en_bd": catalogo_bd[pid]}
+        for pid in sorted(creados_por_programa)
+        if pid in catalogo_bd and pid in PROGRAMAS_OFICIALES
+        and _norm_nombre(catalogo_bd[pid]) != PROGRAMAS_OFICIALES[pid]
+    ]
+    if programas_desalineados:
+        logger.warning("Catalogo de programas desalineado: %s", programas_desalineados)
     return {
         "message": "Ingesta procesada",
         "estudiantes_creados": estudiantes_creados,
         "ya_existentes": ya_existentes,
         "sin_programa": sin_programa,
+        "con_error": con_error,
+        "creados_por_programa": {str(k): v for k, v in sorted(creados_por_programa.items())},
+        "programas_sin_plan": programas_sin_plan,
+        "programas_desalineados": programas_desalineados,
     }
 
 @router.post("/estudiantes/", response_model=EstudianteResponse, status_code=status.HTTP_201_CREATED)

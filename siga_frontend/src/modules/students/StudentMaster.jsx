@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, Fragment } from 'react';
 import { createPortal } from 'react-dom';
 import { useAuth } from '../../core/auth/useAuth';
 import { API_BASE } from '../../core/api/client';
-import { PROGRAMAS_ESTUDIANTE_LISTA } from '../../core/constants/programas';
+import { PROGRAMAS_ESTUDIANTE, PROGRAMAS_ESTUDIANTE_LISTA } from '../../core/constants/programas';
 import { useToast } from '../../core/ui/ToastContext';
 import { useBajasEstudiante } from './useBajasEstudiante';
 import techBg from '../../assets/tech-bg.jpg';
@@ -900,23 +900,20 @@ export function StudentMaster() {
   //   1. POST /api/mod-admision/upload   -> publica los postulantes del Excel
   //   2. GET  /api/mod-admision/admitidos -> lista normalizada (programa_id oficial)
   //   3. POST /api/mod-gestion-academica/admision/ingesta -> crea los estudiantes nuevos
-  const handleSincronizar = async () => {
+  const handleSincronizar = () => {
     if (!['superadmin', 'admin'].includes(userRole)) {
       toast.error('Solo el administrador puede sincronizar ingresantes de Admisión.');
       return;
     }
-    const ok = await toast.confirm({
-      title: 'Sincronizar desde Admisión',
-      message: 'Selecciona el Excel de resultados de Admisión (ADMISION_2026.xlsx). '
-        + 'Se registrarán como estudiantes los ingresantes que aún no existan; los ya registrados no se modifican.',
-      type: 'info',
-      confirmText: 'Elegir Excel'
-    });
-    if (!ok) return;
-    if (admisionFileRef.current) {
-      admisionFileRef.current.value = '';
-      admisionFileRef.current.click();
+    // El selector se abre en el mismo clic (sin await previo): los navegadores
+    // bloquean input.click() si se pierde la "activacion de usuario".
+    const input = admisionFileRef.current;
+    if (!input) {
+      toast.error('No se pudo abrir el selector de archivos. Recarga la página e inténtalo de nuevo.');
+      return;
     }
+    input.value = '';
+    input.click();
   };
 
   const leerError = async (res, porDefecto) => {
@@ -936,6 +933,14 @@ export function StudentMaster() {
       toast.error('El archivo debe ser un Excel .xlsx (plantilla ADMISION_2026.xlsx).');
       return;
     }
+    const ok = await toast.confirm({
+      title: 'Sincronizar desde Admisión',
+      message: `Se cargará "${file.name}" y se registrarán como estudiantes los ingresantes que aún no existan. `
+        + 'Los estudiantes ya registrados no se modifican.',
+      type: 'info',
+      confirmText: 'Sí, sincronizar'
+    });
+    if (!ok) return;
     const auth = { 'Authorization': `Bearer ${localStorage.getItem('token')}` };
     setSyncing(true);
     try {
@@ -969,22 +974,38 @@ export function StudentMaster() {
       const creados = r.estudiantes_creados ?? 0;
       const existentes = r.ya_existentes ?? 0;
       const omitidos = Array.isArray(r.sin_programa) ? r.sin_programa : [];
-      toast.success(
-        `Sincronización completa: ${creados} estudiantes nuevos`
-        + (existentes ? `, ${existentes} ya estaban registrados` : '') + '.',
-        7000
-      );
+      const conError = Array.isArray(r.con_error) ? r.con_error : [];
+      const sinPlan = Array.isArray(r.programas_sin_plan) ? r.programas_sin_plan : [];
+      const resumen = `${creados} estudiantes nuevos`
+        + (existentes ? `, ${existentes} ya estaban registrados` : '');
+      if (creados > 0) {
+        toast.success(`Sincronización completa: ${resumen}.`, 8000);
+      } else {
+        toast.info(`Sincronización completa: ${resumen}. No había ingresantes nuevos.`, 8000);
+      }
       if (omitidos.length) {
         const porCarrera = omitidos.reduce((acc, o) => {
           acc[o.programa] = (acc[o.programa] || 0) + 1;
           return acc;
         }, {});
         const detalle = Object.entries(porCarrera).map(([p, n]) => `${p} (${n})`).join(', ');
-        toast.warning(
-          `${omitidos.length} ingresantes no se registraron porque su carrera no existe en Programas de Estudio: ${detalle}.`,
-          12000
-        );
+        toast.warning(`${omitidos.length} ingresantes sin carrera reconocida no se registraron: ${detalle}.`, 12000);
       }
+      if (conError.length) {
+        const ejemplos = conError.slice(0, 3).map(e => `DNI ${e.dni}`).join(', ');
+        toast.error(`${conError.length} ingresantes no se pudieron registrar (${ejemplos}${conError.length > 3 ? '…' : ''}). Revise el Excel.`, 12000);
+      }
+      if (sinPlan.length) {
+        const nombres = sinPlan.map(id => PROGRAMAS_ESTUDIANTE[id] || `id ${id}`).join(', ');
+        toast.warning(`Estas carreras aún no tienen plan de estudios en el catálogo (importe su malla para matricular): ${nombres}.`, 12000);
+      }
+      const desalineados = Array.isArray(r.programas_desalineados) ? r.programas_desalineados : [];
+      if (desalineados.length) {
+        const detalle = desalineados.map(d => `id ${d.id}: "${d.en_bd}" (debería ser ${PROGRAMAS_ESTUDIANTE[d.id] || d.esperado})`).join('; ');
+        toast.warning(`El catálogo de Programas de Estudio no coincide con el oficial (${detalle}). `
+          + 'Los estudiantes quedaron con su carrera correcta; ejecute scripts/unificar_programas.py antes de matricular.', 15000);
+      }
+      setCurrentPrograma('ALL');
       handleSearch('');
     } catch (e) {
       console.error(e);
