@@ -94,7 +94,9 @@ async def root():
                 formData.append("file", fileInput.files[0]);
                 
                 try {
-                    const res = await fetch('/api/mod-admision/upload', { 
+                    // Ruta relativa: esta pagina se sirve en la raiz del modulo (:8009/),
+                    // donde el endpoint es /upload (no /api/mod-admision/upload).
+                    const res = await fetch('upload', {
                         method: 'POST',
                         body: formData
                     });
@@ -121,153 +123,82 @@ async def root():
     return HTMLResponse(content=html_content)
 
 
-def sanitize_row(row):
-    result = {}
-    for k, v in row.items():
-        if pd.isna(v):
-            result[str(k)] = None
-        elif isinstance(v, pd.Timestamp):
-            result[str(k)] = v.isoformat()
-        else:
-            result[str(k)] = v
-    return result
-
 from starlette.concurrency import run_in_threadpool
 
-def parse_excel_sync(contents: bytes):
-    excel_data = pd.ExcelFile(BytesIO(contents))
-    
-    sheet_names_lower = [s.lower().strip() for s in excel_data.sheet_names]
-    b_datos_idx = None
-    for i, name in enumerate(sheet_names_lower):
-        if name == 'b_datos':
-            b_datos_idx = i
-            break
-    
-    if b_datos_idx is None:
-        raise ValueError(f"El Excel debe contener una hoja 'B_Datos'. Hojas encontradas: {excel_data.sheet_names}")
-        
-    df_reg = pd.read_excel(excel_data, sheet_name='B_Datos')
-    if df_reg.shape[1] > 38:
-        df_reg = df_reg.iloc[:, :38]
-    
-    df_exo = pd.DataFrame()
-    if 'B_Datos_Exonerados' in excel_data.sheet_names or \
-       any(s.lower().strip() == 'b_datos_exonerados' for s in excel_data.sheet_names):
-        for i, s in enumerate(excel_data.sheet_names):
-            if s.lower().strip() == 'b_datos_exonerados':
-                df_exo = pd.read_excel(excel_data, sheet_name=i)
-                if df_exo.shape[1] > 40:
-                    df_exo = df_exo.iloc[:, :40]
-                break
-            
-    admitidos_list = []
-    
-    for _, row in df_reg.iterrows():
-        row_dict = sanitize_row(row)
-        if not row_dict.get('NRO DE DOCUMENTO'): continue
-        dni = str(row_dict.get('NRO DE DOCUMENTO', '')).replace('.0', '').strip()
-        admitidos_list.append(PostulanteAdmitido(
-            dni=dni,
-            nombres=str(row_dict.get('NOMBRES', '')).strip(),
-            apellidos=f"{row_dict.get('APELLIDO PATERNO', '')} {row_dict.get('APELLIDO MATERNO', '')}".strip(),
-            programa_nombre=str(row_dict.get('PROGRAMA DE   ESTUDIOS', '')).strip(),
-            modalidad_admision="ORDINARIO",
-            email=str(row_dict.get('CORREO:', '')).strip() if row_dict.get('CORREO:') else None,
-            celular=str(row_dict.get('CELULAR', '')).replace('.0', '').strip() if row_dict.get('CELULAR') else None,
-            fecha_nacimiento=str(row_dict.get('FECHA NACIMIENTO: ', '')).strip() if row_dict.get('FECHA NACIMIENTO: ') else None,
-            metadata_admision=row_dict
-        ))
-        
-    for _, row in df_exo.iterrows():
-        row_dict = sanitize_row(row)
-        if not row_dict.get('NRO DE DOCUMENTO'): continue
-        dni = str(row_dict.get('NRO DE DOCUMENTO', '')).replace('.0', '').strip()
-        modalidad = str(row_dict.get('MODALIDAD', 'EXONERADO')).strip()
-        admitidos_list.append(PostulanteAdmitido(
-            dni=dni,
-            nombres=str(row_dict.get('NOMBRES', '')).strip(),
-            apellidos=f"{row_dict.get('APELLIDO PATERNO', '')} {row_dict.get('APELLIDO MATERNO', '')}".strip(),
-            programa_nombre=str(row_dict.get('PROGRAMA DE   ESTUDIOS', '')).strip(),
-            modalidad_admision=modalidad,
-            email=str(row_dict.get('CORREO:', '')).strip() if row_dict.get('CORREO:') else None,
-            celular=str(row_dict.get('CELULAR', '')).replace('.0', '').strip() if row_dict.get('CELULAR') else None,
-            fecha_nacimiento=str(row_dict.get('FECHA NACIMIENTO: ', '')).strip() if row_dict.get('FECHA NACIMIENTO: ') else None,
-            metadata_admision=row_dict
-        ))
-        
-    return admitidos_list
+from admision_excel import parse_excel, resolver_programa_id
+
+MAX_EXCEL_BYTES = 15 * 1024 * 1024  # 15 MB
+
 
 @app.post("/upload")
 async def upload_excel(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+    """Carga el Excel de resultados (hojas B_Datos y B_Datos_Exonerados).
+
+    Reemplaza la lista de admitidos publicada; no toca la tabla de estudiantes
+    (eso lo hace la ingesta de mod-gestion-academica).
+    """
+    if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(status_code=400, detail="Suba el Excel de resultados en formato .xlsx.")
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="El archivo esta vacio.")
+    if len(contents) > MAX_EXCEL_BYTES:
+        raise HTTPException(status_code=413, detail="El archivo supera los 15 MB.")
+
     try:
-        contents = await file.read()
-        try:
-            admitidos_list = await run_in_threadpool(parse_excel_sync, contents)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-            
-        # Limpiar tabla e insertar
+        filas, avisos = await run_in_threadpool(parse_excel, contents)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not filas:
+        raise HTTPException(status_code=400, detail="El Excel no contiene postulantes con DNI.")
+
+    try:
         await db.execute(delete(PostulanteAdmitido))
-        db.add_all(admitidos_list)
+        db.add_all(PostulanteAdmitido(**f) for f in filas)
         await db.commit()
-        
-        global is_published
-        is_published = True
-        
-        return {"message": f"Se procesaron {len(admitidos_list)} estudiantes exitosamente. Resultados publicados."}
-        
-    except Exception as e:
+    except Exception:
+        await db.rollback()
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="No se pudo guardar la lista de admitidos.")
+
+    global is_published
+    is_published = True
+
+    sin_carrera = sum(1 for f in filas if resolver_programa_id(f["programa_nombre"]) is None)
+    return {
+        "message": f"Se procesaron {len(filas)} postulantes. Resultados publicados.",
+        "total": len(filas),
+        "sin_carrera_reconocida": sin_carrera,
+        "avisos": avisos[:50],
+    }
+
 
 @app.get("/admitidos")
 async def get_admitidos(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(PostulanteAdmitido))
-    records = result.scalars().all()
-    
-    # Formateamos para el core
-    formatted = []
-    
-    # Mapping simplificado para el programa_id temporal (el core deberia mapear, pero para MVP enviamos un fallback id)
-    # Mapeo exacto alineado con los IDs del frontend (1=Arquitectura/Sistemas, 2=Enfermeria, 4=Administracion, 5=Contabilidad, 6=Mecatronica)
-    program_mapping = {
-        "DESARROLLO DE SISTEMAS DE INFORMACIÓN": 1,
-        "ENFERMERÍA TÉCNICA": 2,
-        "GESTIÓN ADMINISTRATIVA": 4,
-        "ASISTENCIA ADMINISTRATIVA": 4,
-        "CONTABILIDAD": 5,
-        "MECATRÓNICA AUTOMOTRIZ": 6,
-        "ELECTRICIDAD INDUSTRIAL": 7,
-        "ADMINISTRACIÓN DE OPERACIONES TURÍSTICAS": 8,
-        "CONSTRUCCIÓN CIVIL": 9,
-        "PRODUCCIÓN AGROPECUARIA": 10,
-        "MANEJO FORESTAL": 11
-    }
-    
-    for r in records:
-        prog_name_upper = r.programa_nombre.upper()
-        # Fallback a 99 (Desconocido) en lugar de 1, para no mezclar con Sistemas
-        prog_id = 99
-        for k,v in program_mapping.items():
-            if k in prog_name_upper or prog_name_upper in k:
-                prog_id = v
-                break
-                
-        formatted.append({
+    """Lista de admitidos en el formato que espera la ingesta del Core.
+
+    `programa_id` usa el catalogo oficial (ver admision_excel.PROGRAMAS_OFICIALES);
+    es null si la carrera del Excel no se reconoce.
+    """
+    result = await db.execute(select(PostulanteAdmitido).order_by(PostulanteAdmitido.id))
+    formatted = [
+        {
             "dni": r.dni,
             "nombres": r.nombres,
             "apellidos": r.apellidos,
-            "programa_id": prog_id, 
+            "programa_id": resolver_programa_id(r.programa_nombre),
+            "programa_nombre": r.programa_nombre,
             "celular": r.celular,
             "email_personal": r.email,
             "fecha_nacimiento": r.fecha_nacimiento,
             "modalidad": r.modalidad_admision,
-            "metadata_completa": r.metadata_admision
-        })
-        
+            "metadata_completa": r.metadata_admision,
+        }
+        for r in result.scalars().all()
+    ]
     return {"admitidos": formatted}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8009)

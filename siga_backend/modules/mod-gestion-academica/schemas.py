@@ -92,7 +92,9 @@ class IngestaAdmitido(BaseModel):
     dni: str
     nombres: str
     apellidos: str
-    programa_id: int
+    # Id del catalogo oficial; null si Admision no reconocio la carrera del Excel.
+    programa_id: Optional[int] = None
+    programa_nombre: Optional[str] = None
     periodo_id: Optional[int] = 1
     celular: Optional[str] = None
     email_personal: Optional[str] = None

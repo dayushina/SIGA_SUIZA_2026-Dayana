@@ -10,7 +10,7 @@ import { EditStudentModal } from './EditStudentModal';
 import { StudentDetail } from './StudentDetail';
 import { ProtectedImage } from './ProtectedImage';
 import { DEPARTAMENTOS, getProvincias, getDistritos } from './ubigeoPeru';
-import { GraduationCap, Search, CloudDownload, Plus, Users, Pencil, ChevronRight, ChevronLeft, ChevronDown, Check, LayoutGrid, Info, X, Mail, Phone, MapPin, CheckCircle2, FileCheck2, UserPlus, Sparkles, Camera, Trash2, AlertTriangle, Eye, CreditCard } from 'lucide-react';
+import { GraduationCap, Search, CloudDownload, Plus, Users, Pencil, ChevronRight, ChevronLeft, ChevronDown, Check, LayoutGrid, Info, X, Mail, Phone, MapPin, CheckCircle2, FileCheck2, UserPlus, Sparkles, Camera, Trash2, AlertTriangle, Eye, CreditCard, Loader2 } from 'lucide-react';
 
 // Puente entre sectores: Línea con puntitos unida a cada extremo con degradé dinámico según el estado
 const SectorBridge = ({ fromStepId, currentStep }) => {
@@ -549,6 +549,9 @@ export function StudentMaster() {
 
   const [form, setForm] = useState(() => createEmptyStudentForm());
   const [submitting, setSubmitting] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncStep, setSyncStep] = useState('');
+  const admisionFileRef = useRef(null);
   const [codeLoading, setCodeLoading] = useState(false);
 
   const [showMissing, setShowMissing] = useState(false);
@@ -893,57 +896,103 @@ export function StudentMaster() {
     }
   };
 
+  // Sincronizacion con Admision (todo via Gateway):
+  //   1. POST /api/mod-admision/upload   -> publica los postulantes del Excel
+  //   2. GET  /api/mod-admision/admitidos -> lista normalizada (programa_id oficial)
+  //   3. POST /api/mod-gestion-academica/admision/ingesta -> crea los estudiantes nuevos
   const handleSincronizar = async () => {
-    if (userRole !== 'superadmin' && userRole !== 'admin') {
-      toast.error("Solo el Super Admin puede ejecutar la ingesta de Admisión.");
+    if (!['superadmin', 'admin'].includes(userRole)) {
+      toast.error('Solo el administrador puede sincronizar ingresantes de Admisión.');
       return;
     }
-
     const ok = await toast.confirm({
-      title: 'Sincronizar Admisión',
-      message: '¿Sincronizar lista de ingresantes desde el módulo de Admisión?',
+      title: 'Sincronizar desde Admisión',
+      message: 'Selecciona el Excel de resultados de Admisión (ADMISION_2026.xlsx). '
+        + 'Se registrarán como estudiantes los ingresantes que aún no existan; los ya registrados no se modifican.',
       type: 'info',
-      confirmText: 'Sí, sincronizar'
+      confirmText: 'Elegir Excel'
     });
     if (!ok) return;
-    setLoading(true);
+    if (admisionFileRef.current) {
+      admisionFileRef.current.value = '';
+      admisionFileRef.current.click();
+    }
+  };
+
+  const leerError = async (res, porDefecto) => {
     try {
-      // via gateway, do not puncture the module directly
-      const resAdmision = await fetch(`${API_BASE}/api/mod-admision/admitidos`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      const cuerpo = await res.json();
+      if (typeof cuerpo.detail === 'string') return cuerpo.detail;
+      if (cuerpo.detail) return JSON.stringify(cuerpo.detail);
+      return cuerpo.message || porDefecto;
+    } catch {
+      return `${porDefecto} (HTTP ${res.status})`;
+    }
+  };
+
+  const procesarExcelAdmision = async (file) => {
+    if (!file) return;
+    if (!/\.xlsx$/i.test(file.name)) {
+      toast.error('El archivo debe ser un Excel .xlsx (plantilla ADMISION_2026.xlsx).');
+      return;
+    }
+    const auth = { 'Authorization': `Bearer ${localStorage.getItem('token')}` };
+    setSyncing(true);
+    try {
+      setSyncStep('Cargando Excel…');
+      const formData = new FormData();
+      formData.append('file', file);
+      const resUpload = await fetch(`${API_BASE}/api/mod-admision/upload`, {
+        method: 'POST', headers: auth, body: formData
       });
+      if (!resUpload.ok) throw new Error(await leerError(resUpload, 'Admisión no pudo procesar el Excel'));
 
-      if (!resAdmision.ok) throw new Error("No se pudo conectar con Admisión Piloto");
-      let admisionData = await resAdmision.json();
-
-      if (admisionData.admitidos.length === 0) {
-        toast.info("No se encontraron ingresantes para el programa seleccionado.");
-        setLoading(false);
+      setSyncStep('Leyendo ingresantes…');
+      const resAdmitidos = await fetch(`${API_BASE}/api/mod-admision/admitidos`, { headers: auth });
+      if (!resAdmitidos.ok) throw new Error(await leerError(resAdmitidos, 'No se pudo leer la lista de Admisión'));
+      const admisionData = await resAdmitidos.json();
+      const admitidos = Array.isArray(admisionData?.admitidos) ? admisionData.admitidos : [];
+      if (admitidos.length === 0) {
+        toast.warning('El Excel no contiene ingresantes con DNI.');
         return;
       }
 
+      setSyncStep(`Registrando ${admitidos.length} ingresantes…`);
       const resIngesta = await fetch(`${API_BASE}/api/mod-gestion-academica/admision/ingesta`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
-        body: JSON.stringify(admisionData)
+        headers: { ...auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admitidos })
       });
+      if (!resIngesta.ok) throw new Error(await leerError(resIngesta, 'Error al registrar los ingresantes'));
+      const r = await resIngesta.json();
 
-      if (resIngesta.ok) {
-        const result = await resIngesta.json();
-        toast.success(`Sincronización exitosa. ${result.estudiantes_creados} nuevos estudiantes ingresados al Core.`);
-        handleSearch('');
-      } else {
-        const err = await resIngesta.text();
-        toast.error(`Error en la ingesta: ${err}`);
+      const creados = r.estudiantes_creados ?? 0;
+      const existentes = r.ya_existentes ?? 0;
+      const omitidos = Array.isArray(r.sin_programa) ? r.sin_programa : [];
+      toast.success(
+        `Sincronización completa: ${creados} estudiantes nuevos`
+        + (existentes ? `, ${existentes} ya estaban registrados` : '') + '.',
+        7000
+      );
+      if (omitidos.length) {
+        const porCarrera = omitidos.reduce((acc, o) => {
+          acc[o.programa] = (acc[o.programa] || 0) + 1;
+          return acc;
+        }, {});
+        const detalle = Object.entries(porCarrera).map(([p, n]) => `${p} (${n})`).join(', ');
+        toast.warning(
+          `${omitidos.length} ingresantes no se registraron porque su carrera no existe en Programas de Estudio: ${detalle}.`,
+          12000
+        );
       }
+      handleSearch('');
     } catch (e) {
       console.error(e);
-      toast.error(e.message);
+      toast.error(e.message || 'No se pudo completar la sincronización con Admisión.');
+    } finally {
+      setSyncing(false);
+      setSyncStep('');
     }
-    setLoading(false);
   };
 
   const handleNext = () => {
@@ -1283,13 +1332,28 @@ export function StudentMaster() {
           </div>
           <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
             {['superadmin', 'admin'].includes(userRole) && (
-              <button
-                className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-white/15 border border-white/30 text-white font-semibold text-sm backdrop-blur-sm hover:bg-white/25 active:scale-[0.98] transition-all duration-200 min-h-[44px] w-full sm:w-auto"
-                onClick={handleSincronizar}
-              >
-                <CloudDownload size={18} className="shrink-0" />
-                <span className="whitespace-nowrap">Sincronizar desde Admisión</span>
-              </button>
+              <>
+                <input
+                  ref={admisionFileRef}
+                  type="file"
+                  accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  className="hidden"
+                  data-testid="admision-excel-input"
+                  onChange={(e) => procesarExcelAdmision(e.target.files?.[0])}
+                />
+                <button
+                  className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-white/15 border border-white/30 text-white font-semibold text-sm backdrop-blur-sm hover:bg-white/25 active:scale-[0.98] transition-all duration-200 min-h-[44px] w-full sm:w-auto disabled:opacity-70 disabled:cursor-wait disabled:active:scale-100"
+                  onClick={handleSincronizar}
+                  disabled={syncing}
+                  aria-busy={syncing}
+                  title="Carga el Excel de resultados de Admisión y registra a los ingresantes"
+                >
+                  {syncing
+                    ? <Loader2 size={18} className="shrink-0 animate-spin" />
+                    : <CloudDownload size={18} className="shrink-0" />}
+                  <span className="whitespace-nowrap">{syncing ? (syncStep || 'Sincronizando…') : 'Sincronizar desde Admisión'}</span>
+                </button>
+              </>
             )}
             <button
               className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-white text-primary font-bold text-sm shadow-lg shadow-black/10 hover:bg-primary-soft active:scale-[0.98] transition-all duration-200 min-h-[44px] w-full sm:w-auto"

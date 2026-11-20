@@ -22,6 +22,7 @@ from shared.identity import es_superadmin, get_identity  # noqa: E402
 ROLES_ANULAR_PAGO = frozenset({"caja_tesoreria"})
 ROLES_DESMATRICULAR = frozenset({"secretaria_academica"})
 ROLES_ELIMINAR_ESTUDIANTE = frozenset()  # solo superadmin
+ROLES_INGESTA_ADMISION = frozenset({"admin"})
 
 MOTIVO_MIN = 5
 

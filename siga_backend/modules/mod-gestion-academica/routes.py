@@ -7,7 +7,7 @@ from database import get_db, OutboxEvent
 from models import Estudiante, Matricula, MatriculaDetalle
 from schemas import EstudianteCreate, EstudianteResponse, EstudianteUpdate, MatriculaCreate, MatriculaResponse, IngestaMasivaRequest
 from admision_normalizer import normalizar_admitido
-from autorizacion import ROLES_DESMATRICULAR, ROLES_ELIMINAR_ESTUDIANTE, exigir_rol, validar_motivo
+from autorizacion import ROLES_DESMATRICULAR, ROLES_ELIMINAR_ESTUDIANTE, ROLES_INGESTA_ADMISION, exigir_rol, validar_motivo
 from domain import EstadoMatricula
 from datetime import datetime
 from typing import List, Optional
@@ -122,14 +122,32 @@ async def ingesta_admitidos(request: Request, data: IngestaMasivaRequest, db: As
     Endpoint para ingestar de forma masiva (PUSH) los admitidos desde la App Externa de Admisión.
     Crea los expedientes de estudiantes y dispara eventos para integrarlos al ecosistema (crear usuarios, matricular, etc).
     """
+    await exigir_rol(request, db, ROLES_INGESTA_ADMISION, "sincronizar ingresantes de Admisión")
+
     estudiantes_creados = 0
-    
+    ya_existentes = 0
+    sin_programa = []
+
+    # Solo se aceptan carreras que existan en el catalogo (evita estudiantes huerfanos).
+    programas_validos = set((await db.execute(text("SELECT id FROM programas_estudio"))).scalars().all())
+    dnis_existentes = set((await db.execute(
+        select(Estudiante.dni).where(Estudiante.dni.in_([a.dni for a in data.admitidos]))
+    )).scalars().all()) if data.admitidos else set()
+
     for admitido in data.admitidos:
         # 1. Capa Anticorrupción: Validar si ya existe
-        existing = await db.execute(select(Estudiante).where(Estudiante.dni == admitido.dni))
-        if existing.scalar_one_or_none():
-            continue # Ya existe, saltamos
-            
+        if admitido.dni in dnis_existentes:
+            ya_existentes += 1
+            continue
+        if admitido.programa_id not in programas_validos:
+            sin_programa.append({
+                "dni": admitido.dni,
+                "nombre": f"{admitido.nombres} {admitido.apellidos}".strip(),
+                "programa": admitido.programa_nombre or (f"id {admitido.programa_id}" if admitido.programa_id else "sin carrera"),
+            })
+            continue
+        dnis_existentes.add(admitido.dni)  # por si el lote trae el DNI repetido
+
         # Generar código universitario estándar
         year = datetime.now().year
         codigo = f"{year}-{admitido.dni}"
@@ -176,7 +194,15 @@ async def ingesta_admitidos(request: Request, data: IngestaMasivaRequest, db: As
         estudiantes_creados += 1
         
     await db.commit()
-    return {"message": "Ingesta procesada", "estudiantes_creados": estudiantes_creados}
+    if sin_programa:
+        logger.warning("Ingesta de Admision: %d admitidos omitidos por carrera inexistente en programas_estudio",
+                       len(sin_programa))
+    return {
+        "message": "Ingesta procesada",
+        "estudiantes_creados": estudiantes_creados,
+        "ya_existentes": ya_existentes,
+        "sin_programa": sin_programa,
+    }
 
 @router.post("/estudiantes/", response_model=EstudianteResponse, status_code=status.HTTP_201_CREATED)
 async def crear_estudiante(request: Request, data: EstudianteCreate, db: AsyncSession = Depends(get_db)):
