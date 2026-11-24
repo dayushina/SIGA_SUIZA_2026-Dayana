@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   UserPlus, UserCog, QrCode, Scale, HeartHandshake,
-  ShieldAlert, Trophy, Users, FolderOpen, PlusCircle, GraduationCap,
+  ShieldAlert, Trophy, Users, FolderOpen, PlusCircle, GraduationCap, ClipboardX, Search,
 } from 'lucide-react';
-import { API_BASE } from '../../core/api/client';
+import { apiClient, API_BASE } from '../../core/api/client';
 import { useAuth } from '../../core/auth/useAuth';
-import { PROGRAMAS_ESTUDIANTE_LISTA } from '../../core/constants/programas';
+import { tieneRol } from '../../core/auth/roles';
 import { EnrollmentProcess } from './EnrollmentProcess';
 import { EnrollmentFlowDiagram } from './EnrollmentFlowDiagram';
 import { AdmissionPanel } from './AdmissionPanel';
@@ -17,6 +17,7 @@ import { RestriccionesPanel } from './RestriccionesPanel';
 import { ResultadoPanel } from './ResultadoPanel';
 import ExtraordinaryEnrollmentModal from './ExtraordinaryEnrollmentModal';
 import { SectionInfoBlock } from './SectionInfoBlock';
+import { BulkUnenrollmentDialog } from './BulkUnenrollmentDialog';
 import { useBajasEstudiante } from '../students/useBajasEstudiante';
 import './enrollmentPremium.css';
 
@@ -28,55 +29,60 @@ export function EnrollmentDashboard() {
   const [students, setStudents] = useState([]);
   const bajas = useBajasEstudiante();
   const [loading, setLoading] = useState(false);
+  const [errorBusqueda, setErrorBusqueda] = useState('');
+  const ultimaBusqueda = useRef(0);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [showBulkUnenrollment, setShowBulkUnenrollment] = useState(false);
   const [view, setView] = useState('list'); // 'list', 'process' or 'diagram'
   const [selectedStudent, setSelectedStudent] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [currentPrograma, setCurrentPrograma] = useState('ALL');
+  const [programas, setProgramas] = useState([]);
+
+  useEffect(() => {
+    if (userRole === 'invitado') return;
+    let activo = true;
+    apiClient.request('/api/mod-programas-estudio/programas?implementados=true')
+      .then(data => { if (activo) setProgramas(Array.isArray(data) ? data : []); })
+      .catch(() => { if (activo) setProgramas([]); });
+    return () => { activo = false; };
+  }, [userRole]);
 
 
   const fetchStudents = async (searchVal = searchTerm) => {
+    const solicitud = ++ultimaBusqueda.current;
     setLoading(true);
+    setErrorBusqueda('');
     try {
-      let url = `${API_BASE}/api/mod-gestion-academica/estudiantes/`;
-      if (currentPrograma && currentPrograma !== 'ALL') {
-        url += `?programa_id=${currentPrograma}`;
+      const filtros = new URLSearchParams();
+      if (userRole !== 'secretaria_programa' && currentPrograma !== 'ALL') {
+        filtros.set('programa_id', currentPrograma);
       }
-      
-      const response = await fetch(url, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      if (searchVal.trim()) filtros.set('q', searchVal.trim());
+      const response = await fetch(`${API_BASE}/api/mod-gestion-academica/estudiantes/?${filtros}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+        cache: 'no-store',
       });
       const data = await response.json();
-      
-      let finalData = Array.isArray(data) ? data : [];
-      if (searchVal.length >= 3) {
-        finalData = finalData.filter(s => 
-          (s.dni && s.dni.includes(searchVal)) || 
-          (s.nombres && s.nombres.toLowerCase().includes(searchVal.toLowerCase())) || 
-          (s.apellidos && s.apellidos.toLowerCase().includes(searchVal.toLowerCase())) || 
-          (s.codigo_estudiante && s.codigo_estudiante.includes(searchVal))
-        );
+      if (!response.ok || response.headers.get('X-Fallback') === 'true' || !Array.isArray(data)) {
+        throw new Error(typeof data.detail === 'string' ? data.detail : 'No se pudo consultar la lista de estudiantes.');
       }
-      setStudents(finalData);
+      if (solicitud === ultimaBusqueda.current) setStudents(data);
     } catch (error) {
-      console.error('Error fetching students:', error);
+      if (solicitud === ultimaBusqueda.current) {
+        setStudents([]);
+        setErrorBusqueda(error.message || 'No se pudo consultar la lista de estudiantes.');
+      }
     } finally {
-      setLoading(false);
+      if (solicitud === ultimaBusqueda.current) setLoading(false);
     }
   };
 
   useEffect(() => {
-    if (userRole !== 'invitado') {
-      if (userRole === 'secretaria_programa' && currentPrograma === 'ALL') {
-        const fallbackId = user?.email === 'secretaria_prog@siga.edu' ? '2' : '1';
-        setCurrentPrograma(user?.programa_id ? String(user.programa_id) : fallbackId);
-      } else {
-        fetchStudents();
-      }
-    }
-    // Solo debe re-ejecutarse al cambiar de programa o rol (no en cada tecla del buscador).
+    if (userRole !== 'invitado') fetchStudents();
+    // El buscador ejecuta su consulta al cambiar el texto.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentPrograma, userRole]);
+  }, [currentPrograma, userRole, user?.programa_id]);
 
   const handleEnrollClick = (student) => {
     setSelectedStudent(student);
@@ -214,10 +220,10 @@ export function EnrollmentDashboard() {
         chips={['Consulta', 'Búsqueda', 'Matrícula']}
       />
 
-      <div className="glass-card p-2 mb-8 flex items-center max-w-3xl gap-2">
+      <div className="glass-card mb-6 flex flex-wrap items-center gap-3 p-3">
         {['superadmin', 'admin'].includes(userRole) && (
           <select 
-            className="input-field py-3 text-sm bg-slate-50 border-none w-48 sm:w-72 font-bold text-primary truncate"
+            className="input-field h-11 w-full truncate bg-slate-50 text-sm font-bold text-primary sm:w-52"
             title="Filtrar por programa de estudio"
             value={currentPrograma}
             onChange={(e) => {
@@ -225,25 +231,40 @@ export function EnrollmentDashboard() {
             }}
           >
             <option value="ALL">Todos los Programas</option>
-            {PROGRAMAS_ESTUDIANTE_LISTA.map(p => (
-              <option key={p.id} value={p.id}>{p.label}</option>
+            {programas.map(p => (
+              <option key={p.id} value={p.id}>{p.nombre}</option>
             ))}
           </select>
         )}
-        <span className="px-4 text-slate-400 text-xl">🔍</span>
-        <input 
-          type="text" 
-          className="w-full bg-transparent border-none focus:ring-0 py-3 text-slate-700 placeholder-slate-400 outline-none"
-          placeholder="Buscar por DNI, Nombre o Código..."
-          value={searchTerm} 
-          onChange={(e) => {
-            setSearchTerm(e.target.value);
-            fetchStudents(e.target.value);
-          }}
-        />
-        {loading && <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin mx-4"></div>}
+        <div className="flex h-11 min-w-0 flex-[1_1_15rem] items-center gap-2.5 rounded-xl border border-slate-200 bg-white px-3.5 focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/15">
+          <Search size={18} className="shrink-0 text-primary/70" aria-hidden="true" />
+          <input
+            type="search"
+            aria-label="Buscar por DNI, nombre o código"
+            className="min-w-0 flex-1 bg-transparent text-sm text-slate-700 outline-none placeholder:text-slate-400 focus:ring-0"
+            placeholder="Buscar por DNI, nombre o código…"
+            value={searchTerm}
+            onChange={(e) => {
+              setSearchTerm(e.target.value);
+              fetchStudents(e.target.value);
+            }}
+          />
+          {loading && <span className="size-4 shrink-0 animate-spin rounded-full border-2 border-primary border-t-transparent" aria-hidden="true" />}
+        </div>
+        {tieneRol(user) && (
+          <button type="button" onClick={() => setShowBulkUnenrollment(true)}
+            className="inline-flex h-11 w-full shrink-0 items-center justify-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 text-sm font-semibold text-rose-800 transition-colors hover:border-rose-300 hover:bg-rose-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-700 sm:ml-auto sm:w-auto">
+            <ClipboardX size={17} aria-hidden="true" /> Desmatricular por lotes
+          </button>
+        )}
       </div>
 
+      {errorBusqueda && (
+        <div role="alert" className="mb-4 flex flex-wrap justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+          <span>{errorBusqueda}</span>
+          <button type="button" className="font-semibold underline" onClick={() => fetchStudents()}>Reintentar</button>
+        </div>
+      )}
       <div className="glass-card p-6">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -265,11 +286,13 @@ export function EnrollmentDashboard() {
                     <p className="text-slate-500 font-medium">Cargando estudiantes...</p>
                   </td>
                 </tr>
-              ) : students.length === 0 ? (
+              ) : errorBusqueda ? null : students.length === 0 ? (
                 <tr>
                   <td colSpan="6" className="py-12 text-center">
                     <div className="text-4xl mb-3 opacity-50">🎓</div>
-                    <p className="text-slate-500 font-medium">No hay estudiantes registrados.</p>
+                    <p className="text-slate-500 font-medium">
+                      {searchTerm.trim() ? 'No se encontraron estudiantes para esta búsqueda.' : 'No hay estudiantes en el padrón disponible.'}
+                    </p>
                   </td>
                 </tr>
               ) : (
@@ -324,6 +347,10 @@ export function EnrollmentDashboard() {
           handleEnrollClick(student);
         }}
       />
+      {showBulkUnenrollment && tieneRol(user) && (
+        <BulkUnenrollmentDialog programas={programas} programaInicial={currentPrograma} busquedaInicial={searchTerm}
+          onClose={() => setShowBulkUnenrollment(false)} onApplied={() => fetchStudents()} />
+      )}
         </>
       )}
       </div>

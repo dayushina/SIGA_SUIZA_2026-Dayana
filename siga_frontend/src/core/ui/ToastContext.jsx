@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { ConfirmContext } from './ConfirmModal';
 import { CheckCircle2, AlertCircle, AlertTriangle, Info, X } from 'lucide-react';
 
 const ToastContext = createContext(null);
@@ -210,14 +211,29 @@ export function ToastProvider({ children }) {
  * - const { toast } = useToast(); toast.success('...');
  * - const { showSuccess, showError } = useToast(); showSuccess('...');
  * - const toast = useToast(); toast.success('...');
+ * - const ok = await toast.confirm({ title, message, confirmText }); (modal de ConfirmProvider)
+ * - const texto = await toast.prompt({ title, message });
  */
 // eslint-disable-next-line react-refresh/only-export-components
 export function useToast() {
   const context = useContext(ToastContext);
-  if (!context) {
+  const confirmApi = useContext(ConfirmContext);
+
+  // confirm/prompt delegan en el modal del sistema (ConfirmProvider). Sin el, se usa el
+  // dialogo nativo para que la accion no falle en silencio ("toast.confirm is not a function").
+  const value = useMemo(() => {
+    if (!context) return null;
+    const textoDe = (opts) => (typeof opts === 'string' ? opts : opts?.message || '¿Desea continuar?');
+    const confirm = confirmApi?.confirm
+      || ((opts) => Promise.resolve(window.confirm(textoDe(opts))));
+    const prompt = confirmApi?.prompt || (() => Promise.resolve(null));
+    return { ...context, confirm, prompt, toast: { ...context.toast, confirm, prompt } };
+  }, [context, confirmApi]);
+
+  if (!value) {
     throw new Error('useToast debe ser utilizado dentro de un ToastProvider');
   }
-  return context;
+  return value;
 }
 
 export default ToastProvider;

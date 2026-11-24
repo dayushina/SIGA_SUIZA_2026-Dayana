@@ -159,8 +159,14 @@ async def actualizar_estado_periodo(periodo_id: int, estado: str, request: Reque
     return db_periodo
 
 @router.get("/programas", response_model=List[ProgramaResponse])
-async def obtener_programas(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(ProgramaEstudio).order_by(ProgramaEstudio.nombre))
+async def obtener_programas(implementados: bool = False, db: AsyncSession = Depends(get_db)):
+    consulta = select(ProgramaEstudio).order_by(ProgramaEstudio.nombre)
+    if implementados:
+        tiene_malla = (select(1).select_from(ProgramaModulo)
+                       .join(ProgramaUnidad, ProgramaUnidad.programa_modulo_id == ProgramaModulo.id)
+                       .where(ProgramaModulo.programa_id == ProgramaEstudio.id).exists())
+        consulta = consulta.where(ProgramaEstudio.estado == "activo", ProgramaEstudio.plan_estudio_id.is_not(None), tiene_malla)
+    result = await db.execute(consulta)
     return result.scalars().all()
 
 @router.get("/programas/{programa_id}", response_model=ProgramaResponse)

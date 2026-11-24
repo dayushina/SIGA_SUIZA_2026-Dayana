@@ -546,8 +546,11 @@ def publicar_evento(db: AsyncSession, event_type: str, data: dict, request: Opti
     }))
 
 
-async def estudiante_o_404(db: AsyncSession, estudiante_id: int) -> Estudiante:
-    est = (await db.execute(select(Estudiante).where(Estudiante.id == estudiante_id))).scalar_one_or_none()
+async def estudiante_o_404(db: AsyncSession, estudiante_id: int, *, bloquear: bool = False) -> Estudiante:
+    consulta = select(Estudiante).where(Estudiante.id == estudiante_id)
+    if bloquear:
+        consulta = consulta.with_for_update()
+    est = (await db.execute(consulta)).scalar_one_or_none()
     if not est:
         raise HTTPException(404, detail="Estudiante no encontrado")
     return est
@@ -675,7 +678,8 @@ async def listar_pagos(estudiante_id: Optional[int] = None, db: AsyncSession = D
 @router.post("/pagos", status_code=201)
 async def registrar_pago(data: PagoIn, request: Request, db: AsyncSession = Depends(get_db)):
     secreto = await secreto_qr(db)
-    est = await estudiante_o_404(db, data.estudianteId)
+    # Comparte el bloqueo de la baja del estudiante antes de emitir un recibo.
+    est = await estudiante_o_404(db, data.estudianteId, bloquear=True)
     concepto = (await db.execute(select(ConceptoTupa).where(ConceptoTupa.id == data.conceptoId, ConceptoTupa.activo.is_(True)))).scalar_one_or_none()
     if not concepto:
         raise HTTPException(404, detail="El concepto ya no existe en el tarifario TUPA.")
@@ -819,9 +823,11 @@ async def importar_datos_locales(data: ImportacionIn, request: Request, db: Asyn
             continue
         est = None
         if str(p.get("estudianteId") or "").isdigit():
-            est = (await db.execute(select(Estudiante).where(Estudiante.id == int(p["estudianteId"])))).scalar_one_or_none()
+            est = (await db.execute(select(Estudiante).where(
+                Estudiante.id == int(p["estudianteId"])).with_for_update())).scalar_one_or_none()
         if (not est or str(est.dni) != str(p.get("dni"))) and p.get("dni"):
-            est = (await db.execute(select(Estudiante).where(Estudiante.dni == str(p["dni"])))).scalar_one_or_none()
+            est = (await db.execute(select(Estudiante).where(
+                Estudiante.dni == str(p["dni"])).with_for_update())).scalar_one_or_none()
         if not est:
             resumen["omitidos"] += 1
             continue

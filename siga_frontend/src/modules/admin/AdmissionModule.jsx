@@ -15,6 +15,7 @@ export function AdmissionModule() {
   const handleProcess = async (e) => {
     e.preventDefault();
     if (!file) return;
+    const form = e.currentTarget;
 
     setLoading(true);
     setMessage({ text: '', type: '' });
@@ -34,6 +35,8 @@ export function AdmissionModule() {
       const data = await res.json();
       
       if (res.ok) {
+        form.reset();
+        setFile(null);
         setMessage({ text: data.message || 'Archivo procesado con éxito.', type: 'success' });
       } else {
         setMessage({ text: data.detail || 'Error al procesar el archivo.', type: 'error' });
@@ -59,8 +62,8 @@ export function AdmissionModule() {
         <div className="max-w-2xl mx-auto text-center">
           <h2 className="text-2xl font-bold text-slate-text mb-4">Cargar Resultados de Admisión</h2>
           <p className="text-slate-500 mb-8">
-            Sube el archivo Excel oficial (ej. ADMISION_2026.xlsx) para procesar a los ingresantes.
-            El sistema se encargará de extraer los datos de postulantes regulares y exonerados automáticamente.
+            Carga el Excel oficial para preparar la bandeja temporal de ingresantes.
+            Las filas se liberan de la bandeja al quedar registradas en el padrón de estudiantes.
           </p>
 
           <form onSubmit={handleProcess} className="space-y-6">

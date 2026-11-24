@@ -55,8 +55,15 @@ class HTTPGateway:
         if not module:
             raise HTTPException(404, detail=f"Módulo '{module_name}' no encontrado")
         
+        ruta = path.strip("/")
+        requiere_datos_actuales = (
+            (module_name == "mod-admision" and ruta in {"admitidos", "resumen"})
+            or (module_name == "mod-gestion-academica" and ruta == "estudiantes")
+        )
+        use_cached_fallback = self.resilience_enabled and not requiere_datos_actuales
+
         # 2. VERIFICACIÓN DE RESILIENCIA (si está habilitada)
-        if self.resilience_enabled:
+        if use_cached_fallback:
             resilience_result = await self._check_resilience_fallback(module_name, path, request, user)
             if resilience_result:
                 return resilience_result
@@ -96,7 +103,7 @@ class HTTPGateway:
                 circuit_breaker_manager.get_breaker(module_name).on_failure()
             
             # 4. CACHEAR RESPUESTAS EXITOSAS PARA FALLBACK FUTURO
-            if self.resilience_enabled and response.status_code == 200 and request.method == "GET":
+            if use_cached_fallback and response.status_code == 200 and request.method == "GET":
                 await self._cache_successful_response(module_name, path, response)
             
             # 5. Retornar respuesta al cliente (frontend)
@@ -110,7 +117,7 @@ class HTTPGateway:
             logger.error(f"🛑 Circuit Breaker ABIERTO para {module_name}: Fall-Fast activado")
             
             # Aplicar fallback porque el circuit breaker cortó el flujo
-            if self.resilience_enabled:
+            if use_cached_fallback:
                 fallback_result = await self._execute_fallback(module_name, path, request, "circuit_breaker_open")
                 if fallback_result:
                     return fallback_result
@@ -121,7 +128,7 @@ class HTTPGateway:
             logger.error(f"⏰ Timeout comunicando con {module_name}")
             
             # Aplicar fallback en caso de timeout
-            if self.resilience_enabled:
+            if use_cached_fallback:
                 fallback_result = await self._execute_fallback(module_name, path, request, "timeout")
                 if fallback_result:
                     return fallback_result
@@ -132,7 +139,7 @@ class HTTPGateway:
             logger.error(f"🔌 Error de conexión con {module_name}")
             
             # Aplicar fallback en caso de error de conexión
-            if self.resilience_enabled:
+            if use_cached_fallback:
                 fallback_result = await self._execute_fallback(module_name, path, request, "connection_error")
                 if fallback_result:
                     return fallback_result
@@ -143,7 +150,7 @@ class HTTPGateway:
             logger.error(f"❌ Error comunicando con {module_name}: {e}")
             
             # Aplicar fallback en caso de error genérico
-            if self.resilience_enabled:
+            if use_cached_fallback:
                 fallback_result = await self._execute_fallback(module_name, path, request, "internal_error")
                 if fallback_result:
                     return fallback_result

@@ -37,6 +37,21 @@ def _es_matricula_calificable(estado_matricula: str, estado_curso: Optional[str]
     """Evalúa en memoria si una matrícula y detalle cumplen la condición calificable canónica."""
     return estado_matricula == "confirmada" and (estado_curso is None or estado_curso != "retirado")
 
+
+async def _bloquear_matriculas_para_notas(db: AsyncSession, detalle_ids: set[int]) -> None:
+    if not detalle_ids:
+        return
+    estados = await db.scalars(text("""
+        SELECT m.estado_matricula FROM matriculas m
+        WHERE m.id IN (
+            SELECT md.matricula_id FROM matricula_detalles md
+            WHERE md.id = ANY(CAST(:ids AS integer[]))
+        )
+        ORDER BY m.id FOR SHARE OF m
+    """), {"ids": list(detalle_ids)})
+    if any(estado in {"anulada", "anulada_por_reserva"} for estado in estados):
+        raise HTTPException(409, detail="La matrícula está anulada. No se permite modificar calificaciones.")
+
 def _calcular_promedio(c1, c2, c3):
     notas = [n for n in (c1, c2, c3) if n is not None]
     if not notas:
@@ -217,6 +232,7 @@ async def crear_registro(data: RegistroEvaluacionCreate, request: Request, db: A
               AND md.unidad_didactica_id = :u_id
               AND m.estudiante_id = :est_id
               AND m.periodo_id = :per_id
+            FOR SHARE OF m
         """),
         {
             "det_id": data.matricula_detalle_id,
@@ -472,6 +488,12 @@ async def guardar_registros_batch(items: List[dict], request: Request, db: Async
             if field in item:
                 _validar_nota_vigesimal(item[field])
 
+    # Mantiene estable la vigencia hasta guardar las notas. La desmatrícula
+    # usa FOR UPDATE sobre las mismas filas antes de comprobar las notas.
+    await _bloquear_matriculas_para_notas(db, {
+        int(mid) for mid in mat_ids
+    } | {registro.matricula_detalle_id for registro in existing_by_id.values()})
+
     # 5. Aplicar actualizaciones / inserciones en la transacción
     try:
         actualizados = []
@@ -612,6 +634,7 @@ async def actualizar_notas(registro_id: int, data: RegistroEvaluacionUpdate, req
 
     # 1.c Validar reglas de cierre de acta y fecha límite en carga_lectiva (PASO 2)
     await _validar_cierre_y_fecha_limite(db, db_obj.unidad_didactica_id, db_obj.periodo_id, codigo_periodo)
+    await _bloquear_matriculas_para_notas(db, {db_obj.matricula_detalle_id})
 
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():

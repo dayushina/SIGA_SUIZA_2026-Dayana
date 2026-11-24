@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Depends
+from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 import json
@@ -11,7 +11,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import delete
+from sqlalchemy import column, delete, func, table, text
 
 from database import engine, Base, get_db
 from models import PostulanteAdmitido
@@ -19,15 +19,15 @@ from models import PostulanteAdmitido
 import sys
 sys.path.append("/app")
 
-is_published = False
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all, checkfirst=True)
-    except Exception as e:
-        print(f"init_db: tablas ya existen o error menor: {e}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all, checkfirst=True)
+        # Retira filas confirmadas por versiones anteriores, incluso si el
+        # expediente ya se dio de baja. Las cargas nuevas nunca guardan esa marca.
+        await conn.execute(delete(PostulanteAdmitido).where(PostulanteAdmitido.sincronizado.is_(True)))
+        if await conn.scalar(text("SELECT to_regclass('public.estudiantes')")):
+            await conn.execute(delete(PostulanteAdmitido).where(_registrado_en_padron()))
     yield
 
 app = FastAPI(title="Módulo de Admisión", lifespan=lifespan)
@@ -65,7 +65,7 @@ async def root():
     <body>
         <div class="card">
             <h1 style="color: #1e293b; margin-top:0;">Oficina de Admisión</h1>
-            <p style="color: #64748b;">Carga el archivo Excel de resultados de admisión (ADMISION_2026.xlsx) para procesar e inyectar a los estudiantes en el sistema.</p>
+            <p style="color: #64748b;">Carga el Excel de resultados para preparar la bandeja temporal de Admisión. Cada fila se retira cuando tiene un expediente registrado en el padrón.</p>
             
             <form id="uploadForm">
                 <div class="file-input-container">
@@ -103,17 +103,18 @@ async def root():
                     
                     const data = await res.json();
                     if(res.ok) {
-                        btn.innerText = "¡Procesado Exitosamente!";
+                        fileInput.value = "";
                         statusDiv.innerText = `✅ ${data.message}`;
                         statusDiv.style.color = '#15803d';
                     } else {
                         throw new Error(data.detail || "Error al procesar el archivo");
                     }
                 } catch (err) {
-                    btn.disabled = false;
-                    btn.innerText = "Subir y Procesar Resultados";
                     statusDiv.innerText = `❌ ${err.message}`;
                     statusDiv.style.color = '#dc2626';
+                } finally {
+                    btn.disabled = false;
+                    btn.innerText = "Subir y Procesar Resultados";
                 }
             });
         </script>
@@ -123,11 +124,21 @@ async def root():
     return HTMLResponse(content=html_content)
 
 
+from typing import List
+
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from admision_excel import parse_excel, resolver_programa_id
 
 MAX_EXCEL_BYTES = 15 * 1024 * 1024  # 15 MB
+_PADRON = table("estudiantes", column("dni"), schema="public")
+
+
+def _registrado_en_padron():
+    # Admisión y Gestión Académica comparten PostgreSQL.
+    return (select(1).select_from(_PADRON).where(_PADRON.c.dni == PostulanteAdmitido.dni)
+            .correlate(PostulanteAdmitido.__table__).exists())
 
 
 @app.post("/upload")
@@ -139,7 +150,7 @@ async def upload_excel(file: UploadFile = File(...), db: AsyncSession = Depends(
     """
     if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Suba el Excel de resultados en formato .xlsx.")
-    contents = await file.read()
+    contents = await file.read(MAX_EXCEL_BYTES + 1)
     if not contents:
         raise HTTPException(status_code=400, detail="El archivo esta vacio.")
     if len(contents) > MAX_EXCEL_BYTES:
@@ -153,8 +164,16 @@ async def upload_excel(file: UploadFile = File(...), db: AsyncSession = Depends(
         raise HTTPException(status_code=400, detail="El Excel no contiene postulantes con DNI.")
 
     try:
+        # Serializa publicaciones concurrentes sin bloquear la lectura del padrón.
+        await db.execute(text("LOCK TABLE admision_postulantes IN SHARE ROW EXCLUSIVE MODE"))
         await db.execute(delete(PostulanteAdmitido))
-        db.add_all(PostulanteAdmitido(**f) for f in filas)
+        pendientes = [PostulanteAdmitido(**fila) for fila in filas]
+        db.add_all(pendientes)
+        await db.flush()
+        retirados = set((await db.scalars(
+            delete(PostulanteAdmitido).where(_registrado_en_padron()).returning(PostulanteAdmitido.id)
+        )).all())
+        ids_pendientes = [fila.id for fila in pendientes if fila.id not in retirados]
         await db.commit()
     except Exception:
         await db.rollback()
@@ -162,28 +181,63 @@ async def upload_excel(file: UploadFile = File(...), db: AsyncSession = Depends(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="No se pudo guardar la lista de admitidos.")
 
-    global is_published
-    is_published = True
-
     sin_carrera = sum(1 for f in filas if resolver_programa_id(f["programa_nombre"]) is None)
+    mensaje = f"Se procesaron {len(filas)} ingresantes. "
+    if ids_pendientes:
+        mensaje += (f"{len(ids_pendientes)} pendientes de registrar. "
+                    "Usa «Sincronizar desde Admisión» en Registro de Estudiantes.")
+    else:
+        mensaje += "Todos tienen expediente en el padrón. La bandeja de Admisión quedó vacía."
     return {
-        "message": f"Se procesaron {len(filas)} postulantes. Resultados publicados.",
+        "message": mensaje,
         "total": len(filas),
+        "ids_pendientes": ids_pendientes,
+        "ya_registrados": len(retirados),
         "sin_carrera_reconocida": sin_carrera,
         "avisos": avisos[:50],
     }
 
 
+@app.get("/resumen")
+async def resumen_admitidos(response: Response, db: AsyncSession = Depends(get_db)):
+    """La lista publicada contiene únicamente filas que quedan por procesar."""
+    response.headers["Cache-Control"] = "no-store"
+    pendientes = await db.scalar(select(func.count()).select_from(PostulanteAdmitido))
+    return {"total": pendientes, "pendientes": pendientes, "sincronizados": 0}
+
+
+class MarcarSincronizados(BaseModel):
+    dnis: List[str] = Field(default_factory=list, max_length=20000)
+
+
+@app.post("/admitidos/sincronizados")
+async def marcar_sincronizados(data: MarcarSincronizados, db: AsyncSession = Depends(get_db)):
+    """Retira filas confirmadas por clientes anteriores."""
+    dnis = {str(d).strip() for d in data.dnis if str(d).strip()}
+    if not dnis:
+        return {"marcados": 0}
+    result = await db.execute(
+        delete(PostulanteAdmitido)
+        .where(PostulanteAdmitido.dni.in_(dnis), _registrado_en_padron())
+    )
+    await db.commit()
+    return {"marcados": result.rowcount or 0}
+
+
 @app.get("/admitidos")
-async def get_admitidos(db: AsyncSession = Depends(get_db)):
+async def get_admitidos(response: Response, solo_pendientes: bool = False, db: AsyncSession = Depends(get_db)):
     """Lista de admitidos en el formato que espera la ingesta del Core.
 
     `programa_id` usa el catalogo oficial (ver admision_excel.PROGRAMAS_OFICIALES);
     es null si la carrera del Excel no se reconoce.
+    Se acepta `solo_pendientes` por compatibilidad. Ambas consultas muestran la bandeja temporal.
     """
-    result = await db.execute(select(PostulanteAdmitido).order_by(PostulanteAdmitido.id))
+    response.headers["Cache-Control"] = "no-store"
+    query = select(PostulanteAdmitido).order_by(PostulanteAdmitido.id)
+    result = await db.execute(query)
     formatted = [
         {
+            "admision_id": r.id,
             "dni": r.dni,
             "nombres": r.nombres,
             "apellidos": r.apellidos,

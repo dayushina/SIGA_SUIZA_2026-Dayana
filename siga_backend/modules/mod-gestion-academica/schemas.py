@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, ConfigDict
+from pydantic import BaseModel, EmailStr, ConfigDict, Field
 from typing import Optional, List
 from datetime import date, datetime
 
@@ -89,6 +89,7 @@ class MatriculaResponse(MatriculaBase):
     model_config = ConfigDict(from_attributes=True)
 
 class IngestaAdmitido(BaseModel):
+    admision_id: Optional[int] = Field(default=None, gt=0, le=2147483647)
     dni: str
     nombres: str
     apellidos: str

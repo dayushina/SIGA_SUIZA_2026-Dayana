@@ -2,7 +2,9 @@ import React, { createContext, useContext, useState, useCallback, useEffect, use
 import { createPortal } from 'react-dom';
 import { AlertTriangle, HelpCircle, FileText, X } from 'lucide-react';
 
-const ConfirmContext = createContext(null);
+// Exportado para que useToast() exponga confirm/prompt (toast.confirm) sobre este mismo modal.
+// eslint-disable-next-line react-refresh/only-export-components
+export const ConfirmContext = createContext(null);
 
 /**
  * Contenido interno del modal cuando está activo.

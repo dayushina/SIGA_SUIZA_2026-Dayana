@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import { apiClient, API_BASE } from '../../core/api/client';
 import { SectionInfoBlock } from './SectionInfoBlock';
-import { getDefaultPeriod, getPeriodLabel, getPeriodLabelById, isHistoricalPeriod, isFirstPeriodOfYear } from './periodUtils';
+import { getPeriodLabel, getPeriodLabelById, isFirstPeriodOfYear } from './periodUtils';
 import './enrollmentPremium.css';
 
 // Definido a nivel de modulo: crearlo dentro del render lo re-monta en cada render.
@@ -50,16 +50,13 @@ export function AdmissionPanel() {
     (async () => {
       try {
         const [p, pe] = await Promise.all([
-          apiClient.request('/api/mod-programas-estudio/programas').catch(() => []),
+          apiClient.request('/api/mod-programas-estudio/programas?implementados=true').catch(() => []),
           apiClient.callModule('mod-programas-estudio', 'periodos').catch(() => []),
         ]);
         const prog = Array.isArray(p) ? p : [];
         const per = Array.isArray(pe) ? pe : [];
         setPrograms(prog);
         setPeriods(per);
-        if (prog.length > 0) setProgramaId(String(prog[0].id));
-        const activo = getDefaultPeriod(per);
-        if (activo) setPeriodoId(String(activo.id));
       } catch (e) {
         console.error('No se pudieron cargar programas/periodos:', e);
       }
@@ -71,33 +68,19 @@ export function AdmissionPanel() {
       setError('Selecciona un archivo .xlsx, .xls o .json');
       return;
     }
-    if (!periodoId) {
-      setError('Selecciona un periodo de matrícula');
-      return;
-    }
-    const selPeriodo = periods.find(p => String(p.id) === String(periodoId));
-    const estSel = (selPeriodo?.estado || '').toString().toLowerCase();
-    if (estSel === 'historico' || estSel === 'cerrado') {
-      setError('Este periodo es histórico y ya no permite nuevas matrículas.');
-      return;
-    }
-    if (!dryRun && !isFirstPeriodOfYear(selPeriodo)) {
-      setError(`Operación no permitida: La matrícula automática de ingresantes (cachimbos) solo está habilitada para periodos de inicio de año (ej. 2026-I, 2027-I). En el periodo '${selPeriodo?.codigo || periodoId}' no existen cachimbos nuevos; todos los estudiantes son continuadores o históricos.`);
-      return;
-    }
     setLoading(true);
     setError('');
-    setPreview(null);
+    if (dryRun) setPreview(null);
     setResultado(null);
     try {
       const fd = new FormData();
       fd.append('file', file);
       const params = new URLSearchParams({
-        periodo_id: periodoId,
         matricular: String(!dryRun),
         dry_run: String(dryRun),
       });
       if (programaId) params.set('programa_id', programaId);
+      if (periodoId) params.set('periodo_id', periodoId);
 
       const res = await fetch(
         `${API_BASE}/api/mod-gestion-academica/admision/upload-excel?${params.toString()}`,
@@ -110,7 +93,10 @@ export function AdmissionPanel() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
       if (dryRun) setPreview(data);
-      else setResultado(data);
+      else {
+        setPreview(null);
+        setResultado(data);
+      }
     } catch (e) {
       console.error(e);
       setError(e.message);
@@ -118,6 +104,11 @@ export function AdmissionPanel() {
       setLoading(false);
     }
   };
+
+  const historica = preview?.modo === 'nomina_historica';
+  const puedeProcesar = preview && (historica
+    ? preview.periodo_id && !preview.advertencia && !preview.bloqueados
+    : periodoId && isFirstPeriodOfYear(selPeriodo) && !['cerrado', 'historico'].includes(selPeriodo?.estado));
 
   const verFicha = async (estudianteId) => {
     setFichaLoading(estudianteId);
@@ -139,11 +130,11 @@ export function AdmissionPanel() {
       <SectionInfoBlock
         icon={Upload}
         ghostIcon={GraduationCap}
-        title="1. Admisión — Carga de Ingresantes"
+        title="Admisión y carga de matrículas"
         description={
           <>
-            Carga la relación de ingresantes en <b>Excel</b> o <b>JSON</b>. El sistema genera la ficha y
-            realiza la <b>matrícula automática de Ciclo I</b> según la malla del programa.
+            Carga ingresantes de <b>Ciclo I</b> en Excel o JSON. Para una <b>nómina histórica en Excel</b>,
+            SIGA identifica el programa y el ciclo de cada hoja y verifica el semestre indicado en el archivo.
           </>
         }
       />
@@ -158,9 +149,9 @@ export function AdmissionPanel() {
           <select
             className="input-field w-full py-2.5 text-sm"
             value={programaId}
-            onChange={(e) => setProgramaId(e.target.value)}
+            onChange={(e) => { setProgramaId(e.target.value); setPreview(null); setError(''); }}
           >
-            <option value="">(Usar el del archivo / sin programa)</option>
+            <option value="">Usar el programa del archivo</option>
             {programs.map((p) => (
               <option key={p.id} value={p.id}>{p.nombre}</option>
             ))}
@@ -169,26 +160,20 @@ export function AdmissionPanel() {
         <div className="md:col-span-1">
           <label className="sma-field-label">
             <span className="sma-field-icon"><CalendarDays size={14} /></span>
-            Periodo de matrícula *
+            Periodo de matrícula
           </label>
           <select
             className="input-field w-full py-2.5 text-sm"
             value={periodoId}
             onChange={(e) => {
-              const pid = e.target.value;
-              const sel = periods.find(p => String(p.id) === String(pid));
-              const est = (sel?.estado || '').toString().toLowerCase();
-              if (est === 'historico' || est === 'cerrado') {
-                setError('Este periodo es histórico y ya no permite nuevas matrículas.');
-                return;
-              }
+              setPreview(null);
               setError('');
-              setPeriodoId(pid);
+              setPeriodoId(e.target.value);
             }}
           >
-            <option value="">Selecciona un periodo</option>
+            <option value="">Detectar desde la nómina histórica</option>
             {periods.map((p) => (
-              <option key={p.id} value={p.id} disabled={isHistoricalPeriod(p)}>
+              <option key={p.id} value={p.id}>
                 {getPeriodLabel(p)}
               </option>
             ))}
@@ -212,7 +197,7 @@ export function AdmissionPanel() {
           />
         </div>
 
-        {selPeriodo && !isFirstPeriodOfYear(selPeriodo) && (
+        {!historica && selPeriodo && !isFirstPeriodOfYear(selPeriodo) && (
           <div className="md:col-span-3 p-4 rounded-xl bg-amber-50/90 border border-amber-200 text-amber-900 text-xs flex items-start gap-3">
             <AlertTriangle size={18} className="text-amber-600 flex-shrink-0 mt-0.5" />
             <div>
@@ -235,12 +220,11 @@ export function AdmissionPanel() {
           </button>
           <button
             onClick={() => subir(false)}
-            disabled={loading || !file || (selPeriodo && !isFirstPeriodOfYear(selPeriodo))}
-            title={selPeriodo && !isFirstPeriodOfYear(selPeriodo) ? 'No disponible en periodos posteriores al inicio de año' : ''}
-            className={`sma-btn ${selPeriodo && !isFirstPeriodOfYear(selPeriodo) ? 'opacity-50 cursor-not-allowed bg-slate-300 text-slate-500' : 'sma-btn--primary'}`}
+            disabled={loading || !file || !puedeProcesar}
+            className="sma-btn sma-btn--primary disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <CircleCheckBig size={16} />
-            {loading ? 'Procesando...' : 'Procesar y matricular ingresantes'}
+            {loading ? 'Procesando...' : 'Procesar matrículas'}
           </button>
         </div>
 
@@ -255,12 +239,14 @@ export function AdmissionPanel() {
       {preview && (
         <div className="glass-card p-6">
           <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-            <h5 className="font-bold text-slate-800">Vista previa ({preview.total} registros)</h5>
+            <h5 className="font-bold text-slate-800">Vista previa ({preview.total} registros){historica && ` · ${preview.periodo_codigo}`}</h5>
             <div className="flex gap-2">
               <Badge tone="green">Nuevos: {preview.nuevos}</Badge>
               <Badge tone="amber">Ya existen: {preview.existentes}</Badge>
+              {historica && <Badge tone="red">Por revisar: {preview.bloqueados}</Badge>}
             </div>
           </div>
+          {preview.advertencia && <p role="status" className="mb-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">{preview.advertencia}</p>}
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -269,8 +255,8 @@ export function AdmissionPanel() {
                   <th className="py-2 pr-4">Nombres</th>
                   <th className="py-2 pr-4">Apellidos</th>
                   <th className="py-2 pr-4">Programa</th>
-                  <th className="py-2 pr-4">Celular</th>
-                  <th className="py-2 pr-4">Email</th>
+                  <th className="py-2 pr-4">{historica ? 'Ciclo' : 'Celular'}</th>
+                  <th className="py-2 pr-4">{historica ? 'Unidades' : 'Email'}</th>
                   <th className="py-2">Estado</th>
                 </tr>
               </thead>
@@ -280,11 +266,13 @@ export function AdmissionPanel() {
                     <td className="py-2 pr-4 font-mono text-slate-700">{r.dni}</td>
                     <td className="py-2 pr-4 text-slate-700">{r.nombres}</td>
                     <td className="py-2 pr-4 text-slate-700">{r.apellidos}</td>
-                    <td className="py-2 pr-4 text-slate-500">{r.programa_id || programaId || '-'}</td>
-                    <td className="py-2 pr-4 text-slate-500">{r.celular || '-'}</td>
-                    <td className="py-2 pr-4 text-slate-500">{r.email_personal || '-'}</td>
+                    <td className="py-2 pr-4 text-slate-500">{r.programa_nombre || r.programa_id || programaId || '—'}</td>
+                    <td className="py-2 pr-4 text-slate-500">{historica ? r.ciclo : r.celular || '—'}</td>
+                    <td className="py-2 pr-4 text-slate-500">{historica ? r.unidades : r.email_personal || '—'}</td>
                     <td className="py-2">
-                      {r.existe ? <Badge tone="amber">Ya existe</Badge> : <Badge tone="green">Nuevo</Badge>}
+                      {r.motivo ? <Badge tone="red">{r.motivo}</Badge>
+                        : r.ya_matriculado ? <Badge tone="amber">Ya matriculado</Badge>
+                          : r.existe ? <Badge tone="sky">Expediente existente</Badge> : <Badge tone="green">Nuevo</Badge>}
                     </td>
                   </tr>
                 ))}
@@ -292,7 +280,7 @@ export function AdmissionPanel() {
             </table>
           </div>
           <p className="text-xs text-slate-400 mt-3">
-            La vista previa no guarda nada. Pulsa <b>“Procesar y matricular”</b> para confirmar.
+            La vista previa no guarda cambios. {historica && 'Las unidades se toman de la malla del ciclo. No se importan notas ni pagos.'}
           </p>
         </div>
       )}
@@ -301,7 +289,8 @@ export function AdmissionPanel() {
       {resultado && (
         <div className="glass-card p-6 space-y-4">
           <h4 className="font-bold text-slate-800 flex items-center">
-            <span className="text-green-500 mr-2">✅</span> Admisión procesada
+            <span className="text-green-500 mr-2">✅</span>
+            {resultado.modo === 'nomina_historica' ? `Nómina procesada · ${resultado.periodo_codigo}` : 'Admisión procesada'}
           </h4>
           <div className="flex flex-wrap gap-3">
             <Badge tone="green">Estudiantes nuevos: {resultado.estudiantes_creados}</Badge>

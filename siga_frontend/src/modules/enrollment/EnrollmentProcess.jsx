@@ -64,13 +64,12 @@ export function EnrollmentProcess({ initialStudent, onCancel }) {
     const fetchAcademic = async () => {
       try {
       const [pRes, peRes] = await Promise.all([
-        apiClient.request('/api/mod-programas-estudio/programas').catch(()=>[]),
+        apiClient.request('/api/mod-programas-estudio/programas?implementados=true').catch(()=>[]),
         apiClient.callModule('mod-programas-estudio', 'periodos').catch(()=>[])
       ]);
       const fetchedPrograms = Array.isArray(pRes) ? pRes : [];
       const fetchedPeriods = Array.isArray(peRes) ? peRes : [];
       
-      console.log("Academic Data Loaded:", {fetchedPrograms, fetchedPeriods, initialStudent});
       
       const activePeriod = getDefaultPeriod(fetchedPeriods);
       const isStartOfYear = isFirstPeriodOfYear(activePeriod);
@@ -81,7 +80,7 @@ export function EnrollmentProcess({ initialStudent, onCancel }) {
         const studentProgram = fetchedPrograms.find(p => p.id === initialStudent.programa_id || String(p.id) === String(initialStudent.programa_id));
         setSelection(prev => ({
           ...prev,
-          program: studentProgram || fetchedPrograms[0] || null,
+          program: studentProgram || null,
           period: activePeriod,
           tipo: defaultTipo
         }));

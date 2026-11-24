@@ -17,5 +17,5 @@ class PostulanteAdmitido(Base):
     # Todos los demas campos del Excel
     metadata_admision = Column(JSON, default={})
     
-    # Estado de sincronizacion con SIGA Core
+    # Marca de versiones anteriores. El arranque retira esas filas ya procesadas.
     sincronizado = Column(Boolean, default=False)

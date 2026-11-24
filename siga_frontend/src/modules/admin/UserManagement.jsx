@@ -7,6 +7,7 @@ export function UserManagement() {
   const toast = useToast();
   const [users, setUsers] = useState([]);
   const [roles, setRoles] = useState([]);
+  const [programas, setProgramas] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({
@@ -15,9 +16,20 @@ export function UserManagement() {
     password: '',
     is_active: true,
     is_superuser: false,
-    role_ids: []
+    role_ids: [],
+    programa_estudio_id: '',
   });
   const [editingId, setEditingId] = useState(null);
+  const requierePrograma = roles.some(rol => rol.name === 'secretaria_programa' && formData.role_ids.includes(rol.id));
+
+  useEffect(() => {
+    if (!showModal) return;
+    let activo = true;
+    apiClient.request('/api/mod-programas-estudio/programas?implementados=true')
+      .then(data => { if (activo) setProgramas(Array.isArray(data) ? data : []); })
+      .catch(() => { if (activo) setProgramas([]); });
+    return () => { activo = false; };
+  }, [showModal]);
 
   const loadData = async () => {
     setLoading(true);
@@ -53,7 +65,7 @@ export function UserManagement() {
   };
 
   const openNewUserModal = () => {
-    setFormData({ email: '', full_name: '', password: '', is_active: true, is_superuser: false, role_ids: [] });
+    setFormData({ email: '', full_name: '', password: '', is_active: true, is_superuser: false, role_ids: [], programa_estudio_id: '' });
     setEditingId(null);
     setShowModal(true);
   };
@@ -65,6 +77,7 @@ export function UserManagement() {
       is_active: user.is_active,
       is_superuser: user.is_superuser,
       role_ids: user.roles.map(r => r.id),
+      programa_estudio_id: user.programa_estudio_id ?? '',
       password: '' // empty so it won't be updated unless provided (not implemented for update yet)
     });
     setEditingId(user.id);
@@ -77,19 +90,29 @@ export function UserManagement() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    const payload = { ...formData };
+    if (requierePrograma) {
+      if (!programas.some(p => String(p.id) === String(payload.programa_estudio_id))) {
+        toast.error('Selecciona un programa de estudios implementado para esta cuenta.');
+        return;
+      }
+      payload.programa_estudio_id = Number(payload.programa_estudio_id);
+    } else {
+      delete payload.programa_estudio_id;
+    }
     try {
       if (editingId) {
-        const updateData = { ...formData };
+        const updateData = { ...payload };
         delete updateData.password; // backend update doesn't handle password directly yet
         await apiClient.request(`/api/mod-usuarios/usuarios/${editingId}`, { method: 'PUT', body: JSON.stringify(updateData) });
       } else {
-        await apiClient.request('/api/mod-usuarios/usuarios', { method: 'POST', body: JSON.stringify(formData) });
+        await apiClient.request('/api/mod-usuarios/usuarios', { method: 'POST', body: JSON.stringify(payload) });
       }
       setShowModal(false);
       loadData();
     } catch (error) {
       console.error('Error saving user:', error);
-      toast.error('Error guardando usuario. Verifica la consola para más detalles.');
+      toast.error(error.message || 'No se pudo guardar el usuario.');
     }
   };
 
@@ -317,6 +340,20 @@ export function UserManagement() {
                     ))}
                   </div>
                 </div>
+
+                {requierePrograma && (
+                  <label className="block text-sm font-semibold text-slate-700">
+                    Programa de estudios implementado
+                    <select className="input-field mt-2 w-full" required name="programa_estudio_id"
+                      value={formData.programa_estudio_id} onChange={handleInputChange}>
+                      <option value="">Selecciona un programa</option>
+                      {programas.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+                    </select>
+                    <span className="mt-1 block text-xs font-normal text-slate-600">
+                      Esta asignación determina los estudiantes que la cuenta puede consultar y matricular.
+                    </span>
+                  </label>
+                )}
 
                 <div className="flex justify-end space-x-3 pt-6 border-t border-slate-100 mt-6">
                   <button 

@@ -186,6 +186,109 @@ async def test_no_desmatricula_con_notas_y_elimina_estudiante_sin_historia(clien
 
 
 @pytest.mark.asyncio
+async def test_eliminacion_por_lote_omite_historia_y_revalida_la_seleccion(client, datos):
+    ids = [EST_A, EST_LIMPIO, EST_LIMPIO]
+    lote = "/estudiantes/lote"
+    vista = await client.post(f"{lote}/vista-previa", json={"ids": ids}, headers=h(SECRETARIA))
+    assert vista.status_code == 403
+    vista = await client.post(f"{lote}/vista-previa", json={"ids": ids}, headers=h(SUPERADMIN))
+    assert vista.status_code == 200, vista.text
+    assert vista.json()["elegibles"] == [EST_LIMPIO]
+    assert vista.json()["omitidos"][0]["id"] == EST_A
+    assert any("matrícula" in motivo for motivo in vista.json()["omitidos"][0]["motivos"])
+    assert (await datos.execute(text("SELECT COUNT(*) FROM estudiantes"))).scalar() == 3
+
+    body = {"ids": ids, "motivo": "registro por error", "confirmacion": "ELIMINAR"}
+    sin_permiso = await client.post(f"{lote}/eliminar", json=body, headers=h(SECRETARIA))
+    assert sin_permiso.status_code == 403
+    sin_confirmacion = await client.post(
+        f"{lote}/eliminar", json={**body, "confirmacion": ""}, headers=h(SUPERADMIN))
+    assert sin_confirmacion.status_code == 422
+
+    # Se agregó una matrícula vigente después de la vista previa.
+    await datos.execute(text("""
+        INSERT INTO matriculas (id, estudiante_id, programa_id, periodo_id, estado_matricula, tipo_ingreso,
+                                consolidada, created_at, updated_at)
+        VALUES (603, :estudiante, 1, 1, 'confirmada', 'Ordinario', false, NOW(), NOW())
+    """), {"estudiante": EST_LIMPIO})
+    await datos.commit()
+    resultado = await client.post(f"{lote}/eliminar", json=body, headers=h(SUPERADMIN))
+    assert resultado.status_code == 200, resultado.text
+    assert resultado.json()["eliminados"] == []
+    assert {item["id"] for item in resultado.json()["omitidos"]} == {EST_A, EST_LIMPIO}
+
+    await datos.execute(text("UPDATE matriculas SET estado_matricula = 'anulada' WHERE id = 603"))
+    await datos.commit()
+    resultado = await client.post(f"{lote}/eliminar", json=body, headers=h(SUPERADMIN))
+    assert resultado.status_code == 200, resultado.text
+    assert resultado.json()["eliminados"] == [EST_LIMPIO]
+    assert [item["id"] for item in resultado.json()["omitidos"]] == [EST_A]
+    assert (await datos.execute(text("SELECT id FROM estudiantes ORDER BY id"))).scalars().all() == [EST_A, EST_B]
+    eventos = (await datos.execute(text("""
+        SELECT payload FROM outbox_events WHERE event_type = 'gestion_academica.estudiante.eliminado'
+    """))).scalars().all()
+    assert [evento["data"]["id"] for evento in eventos] == [EST_LIMPIO]
+    assert eventos[0]["data"]["motivo"] == body["motivo"]
+
+    resultado = await client.post(f"{lote}/eliminar", json=body, headers=h(SUPERADMIN))
+    assert resultado.json()["eliminados"] == []
+    assert {item["id"] for item in resultado.json()["omitidos"]} == {EST_A, EST_LIMPIO}
+
+
+@pytest.mark.asyncio
+async def test_desmatricula_lote_superadmin_revalida_y_conserva_historial(client, datos):
+    otra, reciente = 603, 604
+    await datos.execute(text("""
+        INSERT INTO matriculas (id, estudiante_id, programa_id, periodo_id, estado_matricula,
+                                tipo_ingreso, consolidada, created_at, updated_at)
+        VALUES (:otra, :a, 1, 2, 'confirmada', 'Ordinario', false, NOW(), NOW()),
+               (:reciente, :c, 1, 1, 'confirmada', 'Ordinario', false, NOW(), NOW())
+    """), {"otra": otra, "reciente": reciente, "a": EST_A, "c": EST_LIMPIO})
+    await datos.execute(text("""
+        INSERT INTO matricula_detalles (id, matricula_id, unidad_didactica_id, creditos, estado_curso, created_at, updated_at)
+        VALUES (703, :id, 1, 4, 'cursando', NOW(), NOW())
+    """), {"id": reciente})
+    await datos.commit()
+
+    lote = "/matriculas/lote"
+    filtros = {"periodo_id": 1, "programa_id": 1}
+    cuerpo = {"periodo_id": 1, "motivo": "Corrección de registro",
+              "confirmacion": "DESMATRICULAR", "ids": [MAT_A, MAT_B, reciente, otra, MAT_A]}
+    assert (await client.post(f"{lote}/vista-previa", json=filtros, headers=h(SECRETARIA))).status_code == 403
+    assert (await client.post(f"{lote}/anular", json=cuerpo, headers=h(SECRETARIA))).status_code == 403
+    r = await client.post(f"{lote}/vista-previa", json=filtros, headers=h(SUPERADMIN))
+    assert r.status_code == 200, r.text
+    vista = {m["id"]: m for m in r.json()["matriculas"]}
+    assert set(vista) == {MAT_A, MAT_B, reciente}
+    assert not vista[MAT_A]["bloqueo"] and not vista[reciente]["bloqueo"]
+    assert "notas" in vista[MAT_B]["bloqueo"]
+    r = await client.post(f"{lote}/anular", json={**cuerpo, "confirmacion": "no"}, headers=h(SUPERADMIN))
+    assert r.status_code == 422
+
+    # Se guardó una nota entre la vista previa y la confirmación.
+    await datos.execute(text("""
+        INSERT INTO evaluacion_registros (id, matricula_detalle_id, estudiante_id, unidad_didactica_id,
+                                          periodo_id, nota_c1, estado, created_at, updated_at)
+        VALUES (902, 703, :id, 1, 1, 0, 'cursando', NOW(), NOW())
+    """), {"id": EST_LIMPIO})
+    await datos.commit()
+    r = await client.post(f"{lote}/anular", json=cuerpo, headers=h(SUPERADMIN))
+    assert r.status_code == 200, r.text
+    assert r.json()["anuladas"] == [MAT_A]
+    assert {m["id"] for m in r.json()["omitidas"]} == {MAT_B, reciente, otra}
+    assert await datos.scalar(text("SELECT estado FROM tesoreria_pagos WHERE id = :id"), {"id": PAGO_MAT}) == "PAGADO"
+    assert await datos.scalar(text("SELECT estado_academico FROM estudiantes WHERE id = :id"), {"id": EST_A}) == "matriculado"
+    assert await datos.scalar(text("SELECT count(*) FROM matricula_detalles WHERE matricula_id = :id"), {"id": MAT_A}) == 1
+    evento = await datos.scalar(text("SELECT payload FROM outbox_events WHERE event_type = 'gestion_academica.matricula.anulada'"))
+    assert evento["data"]["anulada_por"] == "user1@siga.test"
+    assert evento["data"]["motivo"] == "Corrección de registro"
+
+    r = await client.post(f"{lote}/anular", json=cuerpo, headers=h(SUPERADMIN))
+    assert r.json()["anuladas"] == []
+    assert await datos.scalar(text("SELECT count(*) FROM outbox_events WHERE event_type = 'gestion_academica.matricula.anulada'")) == 1
+
+
+@pytest.mark.asyncio
 async def test_matricula_anulada_permite_volver_a_matricular(client, datos):
     """Antes se comparaba con 'anulado' (estado inexistente) y bloqueaba la rematricula."""
     r = await client.post(f"/matriculas/{MAT_A}/anular", json={"motivo": "periodo equivocado"}, headers=h(SECRETARIA))

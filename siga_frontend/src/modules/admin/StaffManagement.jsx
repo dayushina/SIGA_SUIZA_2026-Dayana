@@ -10,6 +10,7 @@ export function StaffManagement() {
   const [showModal, setShowModal] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [programs, setPrograms] = useState([]);
+  const [implementedPrograms, setImplementedPrograms] = useState([]);
   const [formData, setFormData] = useState({
     email: '',
     full_name: '',
@@ -32,6 +33,8 @@ export function StaffManagement() {
       // Also fetch programs for the dropdown
       const progData = await apiClient.request('/api/mod-programas-estudio/programas');
       setPrograms(Array.isArray(progData) ? progData : []);
+      const implemented = await apiClient.request('/api/mod-programas-estudio/programas?implementados=true');
+      setImplementedPrograms(Array.isArray(implemented) ? implemented : []);
     } catch (error) {
       console.error('Error fetching staff:', error);
     } finally {
@@ -325,7 +328,7 @@ export function StaffManagement() {
                           className="input-field w-full px-4 py-2 font-semibold"
                         >
                           <option value="">-- Seleccionar Carrera --</option>
-                          {programs.map(p => (
+                          {(formData.cargo_funcional === 'SECRETARIA_PROGRAMA' ? implementedPrograms : programs).map(p => (
                             <option key={p.id} value={p.id}>{p.nombre}</option>
                           ))}
                         </select>
@@ -350,6 +353,7 @@ export function StaffManagement() {
                         onChange={handleInputChange}
                         className="w-full px-4 py-2 bg-white border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary/20 focus:border-primary outline-none transition-all font-semibold text-sm"
                       >
+                        {editingId && <option value="NO_INFORMADO">Sin informar</option>}
                         <option value="NOMBRADO_ESTADO">Nombrado (Estado)</option>
                         <option value="CONTRATADO_DRE">Contratado DREU</option>
                         <option value="CONTRATADO_INSTITUCIONAL">Contrato Institucional (RDR)</option>

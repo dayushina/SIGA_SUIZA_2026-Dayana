@@ -415,6 +415,16 @@ async def test_batch_periodo_cerrado_rechaza_409(client_eval, db_session: AsyncS
 
 
 @pytest.mark.asyncio
+async def test_batch_rechaza_notas_de_matricula_anulada(client_eval, db_session, fix_batch_entorno):
+    await db_session.execute(text("UPDATE matriculas SET estado_matricula = 'anulada' WHERE id = 50"))
+    await db_session.commit()
+    r = await client_eval.post("/registros/batch", headers=auth_headers(fix_batch_entorno["superadmin_id"]),
+                              json=[{"id": fix_batch_entorno["evaluacion_id"], "nota_final": 17}])
+    assert r.status_code == 409
+    assert "anulada" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_batch_acta_cerrada_rechaza_409(client_eval, db_session: AsyncSession, fix_batch_entorno):
     """Si el acta ya fue cerrada formalmente, devuelve 409 Conflict."""
     carga_id = fix_batch_entorno["carga_id"]

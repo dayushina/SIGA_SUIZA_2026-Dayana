@@ -27,6 +27,12 @@ class Usuario(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     roles = relationship("Rol", secondary=user_roles, back_populates="usuarios")
+    perfil_personal = relationship("PerfilPersonal", back_populates="usuario", uselist=False)
+
+    @property
+    def programa_estudio_id(self):
+        perfil = self.__dict__.get("perfil_personal")
+        return perfil.programa_estudio_id if perfil else None
 
 class Rol(Base):
     """Mapeo a core_roles"""
@@ -63,4 +69,4 @@ class PerfilPersonal(Base):
     profesion_titulo = Column(String(200), nullable=True)
     programa_estudio_id = Column(Integer, nullable=True) # Referencia lógica cruzada (no FK dura)
     
-    usuario = relationship("Usuario", backref="perfil_personal")
+    usuario = relationship("Usuario", back_populates="perfil_personal")

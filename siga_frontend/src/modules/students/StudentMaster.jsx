@@ -1,16 +1,21 @@
-import { useState, useEffect, useRef, Fragment } from 'react';
+import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
 import { createPortal } from 'react-dom';
 import { useAuth } from '../../core/auth/useAuth';
 import { API_BASE } from '../../core/api/client';
 import { PROGRAMAS_ESTUDIANTE, PROGRAMAS_ESTUDIANTE_LISTA } from '../../core/constants/programas';
 import { useToast } from '../../core/ui/ToastContext';
 import { useBajasEstudiante } from './useBajasEstudiante';
+import { BulkDeleteStudentsDialog } from './BulkDeleteStudentsDialog';
 import techBg from '../../assets/tech-bg.jpg';
 import { EditStudentModal } from './EditStudentModal';
 import { StudentDetail } from './StudentDetail';
 import { ProtectedImage } from './ProtectedImage';
 import { DEPARTAMENTOS, getProvincias, getDistritos } from './ubigeoPeru';
-import { GraduationCap, Search, CloudDownload, Plus, Users, Pencil, ChevronRight, ChevronLeft, ChevronDown, Check, LayoutGrid, Info, X, Mail, Phone, MapPin, CheckCircle2, FileCheck2, UserPlus, Sparkles, Camera, Trash2, AlertTriangle, Eye, CreditCard, Loader2 } from 'lucide-react';
+import { GraduationCap, Search, CloudDownload, Plus, Users, Pencil, ChevronRight, ChevronLeft, ChevronDown, Check, LayoutGrid, Info, X, Mail, Phone, MapPin, CheckCircle2, FileCheck2, UserPlus, Sparkles, Camera, Trash2, AlertTriangle, Eye, CreditCard, Loader2, FileSpreadsheet } from 'lucide-react';
+
+const LOTE_INGESTA = 300;
+const authHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('token')}` });
+const respuestaDegradada = (res) => res.headers.get('X-Fallback') === 'true';
 
 // Puente entre sectores: Línea con puntitos unida a cada extremo con degradé dinámico según el estado
 const SectorBridge = ({ fromStepId, currentStep }) => {
@@ -532,6 +537,8 @@ export function StudentMaster() {
   const userRole = primaryRole;
   const [students, setStudents] = useState([]);
   const [loading, setLoading] = useState(false);
+  const searchRequest = useRef(0);
+  const [bulkSelection, setBulkSelection] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [editingStudent, setEditingStudent] = useState(null);
@@ -549,8 +556,12 @@ export function StudentMaster() {
 
   const [form, setForm] = useState(() => createEmptyStudentForm());
   const [submitting, setSubmitting] = useState(false);
-  const [syncing, setSyncing] = useState(false);
+  const [syncAction, setSyncAction] = useState('');
+  const syncing = Boolean(syncAction);
+  const syncInProgress = useRef(false);
   const [syncStep, setSyncStep] = useState('');
+  const [admisionResumen, setAdmisionResumen] = useState(null); // { total, pendientes, sincronizados }
+  const summaryRequest = useRef(0);
   const admisionFileRef = useRef(null);
   const [codeLoading, setCodeLoading] = useState(false);
 
@@ -632,10 +643,12 @@ export function StudentMaster() {
     if (await bajas.eliminar(s)) {
       if (selectedStudent?.id === s.id) setSelectedStudent(null);
       handleSearch(searchTerm);
+      cargarResumenAdmision();
     }
   };
 
   const handleSearch = async (val = '') => {
+    const requestId = ++searchRequest.current;
     setSearchTerm(val);
     setCurrentPage(1);
     setLoading(true);
@@ -657,24 +670,25 @@ export function StudentMaster() {
           const cuerpo = await res.json();
           detalle = cuerpo.detail || cuerpo.message || detalle;
         } catch { /* cuerpo no-JSON */ }
+        if (requestId !== searchRequest.current) return;
         console.error('API Error:', detalle);
         setStudents([]);
         setLoadError(detalle);
-        setLoading(false);
         return;
       }
 
+      if (requestId !== searchRequest.current) return;
       if (res.headers.get('X-Fallback') === 'true') {
         const detalle = res.headers.get('X-Fallback-Message')
           || 'El servicio de estudiantes respondio con datos degradados.';
         console.error('Respuesta degradada:', detalle);
         setStudents([]);
         setLoadError(detalle);
-        setLoading(false);
         return;
       }
 
       const data = await res.json();
+      if (requestId !== searchRequest.current) return;
       const dataArray = Array.isArray(data) ? data : [];
       const sorted = [...dataArray].sort(compareStudentsByCarrera);
 
@@ -696,11 +710,13 @@ export function StudentMaster() {
         setStudents(sorted);
       }
     } catch (e) {
+      if (requestId !== searchRequest.current) return;
       console.error(e);
       setStudents([]);
       setLoadError('No se pudo conectar con el servidor. Verifique que el backend este levantado.');
+    } finally {
+      if (requestId === searchRequest.current) setLoading(false);
     }
-    setLoading(false);
   };
 
   useEffect(() => {
@@ -896,27 +912,11 @@ export function StudentMaster() {
     }
   };
 
-  // Sincronizacion con Admision (todo via Gateway):
-  //   1. POST /api/mod-admision/upload   -> publica los postulantes del Excel
-  //   2. GET  /api/mod-admision/admitidos -> lista normalizada (programa_id oficial)
-  //   3. POST /api/mod-gestion-academica/admision/ingesta -> crea los estudiantes nuevos
-  const handleSincronizar = () => {
-    if (!['superadmin', 'admin'].includes(userRole)) {
-      toast.error('Solo el administrador puede sincronizar ingresantes de Admisión.');
-      return;
-    }
-    // El selector se abre en el mismo clic (sin await previo): los navegadores
-    // bloquean input.click() si se pierde la "activacion de usuario".
-    const input = admisionFileRef.current;
-    if (!input) {
-      toast.error('No se pudo abrir el selector de archivos. Recarga la página e inténtalo de nuevo.');
-      return;
-    }
-    input.value = '';
-    input.click();
-  };
+  // Admisión conserva solo las filas que aún están en su bandeja temporal.
+  const esAdminAdmision = ['superadmin', 'admin'].includes(userRole);
 
   const leerError = async (res, porDefecto) => {
+    if (respuestaDegradada(res)) return res.headers.get('X-Fallback-Message') || porDefecto;
     try {
       const cuerpo = await res.json();
       if (typeof cuerpo.detail === 'string') return cuerpo.detail;
@@ -927,93 +927,227 @@ export function StudentMaster() {
     }
   };
 
-  const procesarExcelAdmision = async (file) => {
-    if (!file) return;
-    if (!/\.xlsx$/i.test(file.name)) {
-      toast.error('El archivo debe ser un Excel .xlsx (plantilla ADMISION_2026.xlsx).');
+  const cargarResumenAdmision = useCallback(async () => {
+    if (!esAdminAdmision) return null;
+    const requestId = ++summaryRequest.current;
+    let resumen = null;
+    try {
+      const res = await fetch(`${API_BASE}/api/mod-admision/resumen`, { headers: authHeaders(), cache: 'no-store' });
+      if (res.ok && !respuestaDegradada(res)) {
+        const data = await res.json();
+        if (Number.isInteger(data?.total) && Number.isInteger(data?.pendientes)) resumen = data;
+      }
+    } catch {
+      // Un error de transporte deja el resumen como no disponible.
+    }
+    if (requestId === summaryRequest.current) setAdmisionResumen(resumen);
+    return resumen;
+  }, [esAdminAdmision]);
+
+  useEffect(() => {
+    cargarResumenAdmision();
+  }, [cargarResumenAdmision]);
+
+  const mostrarResultadoIngesta = (r) => {
+    if (r.fueraDeBandeja) {
+      toast.info(`${r.fueraDeBandeja} filas ya se procesaron o pertenecen a una carga reemplazada.`, 8000);
+    }
+    const resumen = `${r.creados} estudiantes nuevos`
+      + (r.existentes ? `, ${r.existentes} ya estaban registrados` : '');
+    if (r.sinPrograma.length || r.conError.length) {
+      toast.warning(`Sincronización con pendientes: ${resumen}.`, 8000);
+    } else if (r.creados > 0) {
+      toast.success(`Sincronización completa: ${resumen}.`, 8000);
+    } else if (r.existentes) {
+      toast.info(`${r.existentes} ingresantes ya tenían expediente. Sus filas se retiraron de Admisión.`, 8000);
+    }
+    if (r.sinPrograma.length) {
+      const porCarrera = r.sinPrograma.reduce((acc, o) => {
+        acc[o.programa] = (acc[o.programa] || 0) + 1;
+        return acc;
+      }, {});
+      const detalle = Object.entries(porCarrera).map(([p, n]) => `${p} (${n})`).join(', ');
+      toast.warning(`${r.sinPrograma.length} ingresantes sin carrera reconocida no se registraron: ${detalle}.`, 12000);
+    }
+    if (r.conError.length) {
+      const ejemplos = r.conError.slice(0, 3).map(e => `DNI ${e.dni}`).join(', ');
+      toast.error(`${r.conError.length} ingresantes no se pudieron registrar (${ejemplos}${r.conError.length > 3 ? '…' : ''}). Revise el Excel.`, 12000);
+    }
+    if (r.sinPlan.length) {
+      const nombres = r.sinPlan.map(id => PROGRAMAS_ESTUDIANTE[id] || `id ${id}`).join(', ');
+      toast.warning(`Estas carreras aún no tienen plan de estudios en el catálogo (importe su malla para matricular): ${nombres}.`, 12000);
+    }
+    if (r.desalineados.length) {
+      const detalle = r.desalineados.map(d => `id ${d.id}: "${d.en_bd}" (debería ser ${PROGRAMAS_ESTUDIANTE[d.id] || d.esperado})`).join('; ');
+      toast.warning(`El catálogo de Programas de Estudio no coincide con el oficial (${detalle}). `
+        + 'Los estudiantes quedaron con su carrera correcta; ejecute scripts/unificar_programas.py antes de matricular.', 15000);
+    }
+  };
+
+  // Registra en estudiantes los admitidos pendientes de Admision. Lanza Error si falla.
+  const registrarPendientesAdmision = async (publicacion) => {
+    if (publicacion && !publicacion.ids_pendientes.length) {
+      toast.info(`Los ${publicacion.total} ingresantes del Excel ya están registrados. La bandeja quedó vacía.`);
       return;
     }
-    const ok = await toast.confirm({
-      title: 'Sincronizar desde Admisión',
-      message: `Se cargará "${file.name}" y se registrarán como estudiantes los ingresantes que aún no existan. `
-        + 'Los estudiantes ya registrados no se modifican.',
-      type: 'info',
-      confirmText: 'Sí, sincronizar'
+    setSyncStep('Leyendo ingresantes…');
+    const resAdmitidos = await fetch(`${API_BASE}/api/mod-admision/admitidos?solo_pendientes=true`, {
+      headers: authHeaders(), cache: 'no-store',
     });
-    if (!ok) return;
-    const auth = { 'Authorization': `Bearer ${localStorage.getItem('token')}` };
-    setSyncing(true);
+    if (!resAdmitidos.ok || respuestaDegradada(resAdmitidos)) {
+      throw new Error(await leerError(resAdmitidos, 'No se pudo leer la lista de Admisión'));
+    }
+    const { admitidos: bandeja } = await resAdmitidos.json();
+    if (!Array.isArray(bandeja) || bandeja.some(fila => !Number.isInteger(fila?.admision_id))) {
+      throw new Error('Admisión devolvió una lista de ingresantes inválida.');
+    }
+    const idsPublicados = publicacion && new Set(publicacion.ids_pendientes);
+    const admitidos = idsPublicados ? bandeja.filter(fila => idsPublicados.has(fila.admision_id)) : bandeja;
+    if (admitidos.length === 0) {
+      toast.info(publicacion
+        ? 'Esta carga ya se procesó o fue reemplazada por otro archivo.'
+        : 'La bandeja de Admisión está vacía.');
+      return;
+    }
+
+    const total = {
+      creados: 0, existentes: 0, fueraDeBandeja: 0, sinPrograma: [], conError: [], sinPlan: new Set(), desalineados: new Map()
+    };
     try {
-      setSyncStep('Cargando Excel…');
-      const formData = new FormData();
-      formData.append('file', file);
-      const resUpload = await fetch(`${API_BASE}/api/mod-admision/upload`, {
-        method: 'POST', headers: auth, body: formData
-      });
-      if (!resUpload.ok) throw new Error(await leerError(resUpload, 'Admisión no pudo procesar el Excel'));
-
-      setSyncStep('Leyendo ingresantes…');
-      const resAdmitidos = await fetch(`${API_BASE}/api/mod-admision/admitidos`, { headers: auth });
-      if (!resAdmitidos.ok) throw new Error(await leerError(resAdmitidos, 'No se pudo leer la lista de Admisión'));
-      const admisionData = await resAdmitidos.json();
-      const admitidos = Array.isArray(admisionData?.admitidos) ? admisionData.admitidos : [];
-      if (admitidos.length === 0) {
-        toast.warning('El Excel no contiene ingresantes con DNI.');
-        return;
+      for (let i = 0; i < admitidos.length; i += LOTE_INGESTA) {
+        const lote = admitidos.slice(i, i + LOTE_INGESTA);
+        setSyncStep(`Registrando ${Math.min(i + lote.length, admitidos.length)}/${admitidos.length}…`);
+        const resIngesta = await fetch(`${API_BASE}/api/mod-gestion-academica/admision/ingesta`, {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ admitidos: lote })
+        });
+        if (!resIngesta.ok || respuestaDegradada(resIngesta)) {
+          throw new Error(await leerError(resIngesta, 'Error al registrar los ingresantes'));
+        }
+        const r = await resIngesta.json();
+        if (!Number.isInteger(r?.estudiantes_creados) || !Number.isInteger(r?.ya_existentes)) {
+          throw new Error('Gestión Académica devolvió un resultado de registro inválido.');
+        }
+        total.creados += r.estudiantes_creados;
+        total.existentes += r.ya_existentes;
+        total.fueraDeBandeja += r.fuera_de_bandeja ?? 0;
+        total.sinPrograma.push(...(r.sin_programa || []));
+        total.conError.push(...(r.con_error || []));
+        (r.programas_sin_plan || []).forEach(id => total.sinPlan.add(id));
+        (r.programas_desalineados || []).forEach(d => total.desalineados.set(d.id, d));
       }
-
-      setSyncStep(`Registrando ${admitidos.length} ingresantes…`);
-      const resIngesta = await fetch(`${API_BASE}/api/mod-gestion-academica/admision/ingesta`, {
-        method: 'POST',
-        headers: { ...auth, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ admitidos })
+      mostrarResultadoIngesta({
+        ...total, sinPlan: [...total.sinPlan], desalineados: [...total.desalineados.values()]
       });
-      if (!resIngesta.ok) throw new Error(await leerError(resIngesta, 'Error al registrar los ingresantes'));
-      const r = await resIngesta.json();
-
-      const creados = r.estudiantes_creados ?? 0;
-      const existentes = r.ya_existentes ?? 0;
-      const omitidos = Array.isArray(r.sin_programa) ? r.sin_programa : [];
-      const conError = Array.isArray(r.con_error) ? r.con_error : [];
-      const sinPlan = Array.isArray(r.programas_sin_plan) ? r.programas_sin_plan : [];
-      const resumen = `${creados} estudiantes nuevos`
-        + (existentes ? `, ${existentes} ya estaban registrados` : '');
-      if (creados > 0) {
-        toast.success(`Sincronización completa: ${resumen}.`, 8000);
+    } catch (e) {
+      throw new Error(total.creados ? `${e.message} Se alcanzaron a registrar ${total.creados} estudiantes.` : e.message);
+    } finally {
+      if (currentPrograma === 'ALL') {
+        await handleSearch('');
       } else {
-        toast.info(`Sincronización completa: ${resumen}. No había ingresantes nuevos.`, 8000);
+        setSearchTerm('');
+        setCurrentPrograma('ALL');
       }
-      if (omitidos.length) {
-        const porCarrera = omitidos.reduce((acc, o) => {
-          acc[o.programa] = (acc[o.programa] || 0) + 1;
-          return acc;
-        }, {});
-        const detalle = Object.entries(porCarrera).map(([p, n]) => `${p} (${n})`).join(', ');
-        toast.warning(`${omitidos.length} ingresantes sin carrera reconocida no se registraron: ${detalle}.`, 12000);
-      }
-      if (conError.length) {
-        const ejemplos = conError.slice(0, 3).map(e => `DNI ${e.dni}`).join(', ');
-        toast.error(`${conError.length} ingresantes no se pudieron registrar (${ejemplos}${conError.length > 3 ? '…' : ''}). Revise el Excel.`, 12000);
-      }
-      if (sinPlan.length) {
-        const nombres = sinPlan.map(id => PROGRAMAS_ESTUDIANTE[id] || `id ${id}`).join(', ');
-        toast.warning(`Estas carreras aún no tienen plan de estudios en el catálogo (importe su malla para matricular): ${nombres}.`, 12000);
-      }
-      const desalineados = Array.isArray(r.programas_desalineados) ? r.programas_desalineados : [];
-      if (desalineados.length) {
-        const detalle = desalineados.map(d => `id ${d.id}: "${d.en_bd}" (debería ser ${PROGRAMAS_ESTUDIANTE[d.id] || d.esperado})`).join('; ');
-        toast.warning(`El catálogo de Programas de Estudio no coincide con el oficial (${detalle}). `
-          + 'Los estudiantes quedaron con su carrera correcta; ejecute scripts/unificar_programas.py antes de matricular.', 15000);
-      }
-      setCurrentPrograma('ALL');
-      handleSearch('');
+    }
+  };
+
+  const ejecutarSincronizacion = async (action, tarea) => {
+    if (syncInProgress.current) return;
+    syncInProgress.current = true;
+    setSyncAction(action);
+    try {
+      await tarea();
     } catch (e) {
       console.error(e);
       toast.error(e.message || 'No se pudo completar la sincronización con Admisión.');
     } finally {
-      setSyncing(false);
+      await cargarResumenAdmision();
+      syncInProgress.current = false;
+      setSyncAction('');
       setSyncStep('');
     }
+  };
+
+  // Registra lo que Admision ya publico (no pide el Excel de nuevo).
+  const handleSincronizar = async () => {
+    if (!esAdminAdmision) {
+      toast.error('Solo el administrador puede sincronizar ingresantes de Admisión.');
+      return;
+    }
+    await ejecutarSincronizacion('admision', async () => {
+      setSyncStep('Consultando Admisión…');
+      const resumen = await cargarResumenAdmision();
+      if (!resumen) {
+        toast.error('No se pudo consultar el módulo de Admisión. Verifique que el servicio esté activo.');
+        return;
+      }
+      if (resumen.pendientes > 0) {
+        const ok = await toast.confirm({
+          title: 'Sincronizar desde Admisión',
+          message: `Hay ${resumen.pendientes} ingresantes en la bandeja de Admisión. Cada fila se retirará después de confirmar su registro en el padrón.`,
+          type: 'info',
+          confirmText: 'Registrar ahora'
+        });
+        if (ok) await registrarPendientesAdmision();
+        return;
+      }
+      toast.info('La bandeja de Admisión está vacía.');
+    });
+  };
+
+  // Abre el selector en el mismo clic (sin await previo): los navegadores
+  // bloquean input.click() si se pierde la "activacion de usuario".
+  const abrirSelectorExcelAdmision = () => {
+    if (!esAdminAdmision || syncInProgress.current) return;
+    const input = admisionFileRef.current;
+    if (!input) {
+      toast.error('No se pudo abrir el selector de archivos. Recargue la página e inténtelo de nuevo.');
+      return;
+    }
+    input.value = '';
+    input.click();
+  };
+
+  // Publica un Excel nuevo en Admision y registra a los pendientes.
+  const procesarExcelAdmision = async (file) => {
+    if (!file || !esAdminAdmision || syncInProgress.current) return;
+    if (!/\.xlsx$/i.test(file.name)) {
+      toast.error('El archivo debe ser un Excel .xlsx (plantilla ADMISION_2026.xlsx).');
+      return;
+    }
+    await ejecutarSincronizacion('excel', async () => {
+      const ok = await toast.confirm({
+        title: 'Cargar Excel de Admisión',
+        message: `"${file.name}" reemplazará la lista temporal de Admisión. Los ingresantes que falten en el padrón se registrarán y sus filas se retirarán de la bandeja.`,
+        type: 'info',
+        confirmText: 'Sí, cargar y registrar'
+      });
+      if (!ok) return;
+      setSyncStep('Cargando Excel…');
+      const formData = new FormData();
+      formData.append('file', file);
+      const resUpload = await fetch(`${API_BASE}/api/mod-admision/upload`, {
+        method: 'POST', headers: authHeaders(), body: formData
+      });
+      if (!resUpload.ok || respuestaDegradada(resUpload)) {
+        throw new Error(await leerError(resUpload, 'Admisión no pudo procesar el Excel'));
+      }
+      const publicacion = await resUpload.json();
+      if (!Number.isInteger(publicacion?.total) || publicacion.total <= 0
+        || !Array.isArray(publicacion.ids_pendientes) || publicacion.ids_pendientes.some(id => !Number.isInteger(id))) {
+        throw new Error('Admisión devolvió un resultado de publicación inválido.');
+      }
+      if (publicacion.avisos?.length) {
+        const ejemplos = publicacion.avisos.slice(0, 2).join(' ');
+        toast.warning(`Revisa los avisos del Excel: ${ejemplos}${publicacion.avisos.length > 2 ? ' Hay más avisos.' : ''}`, 12000);
+      }
+      try {
+        await registrarPendientesAdmision(publicacion);
+      } catch (e) {
+        throw new Error(`El Excel se publicó en Admisión. ${e.message} Puedes reintentar con “Sincronizar desde Admisión”.`);
+      }
+    });
   };
 
   const handleNext = () => {
@@ -1321,8 +1455,32 @@ export function StudentMaster() {
   const endIndex = Math.min(startIndex + pageSize, totalStudents);
   const paginatedStudents = students.slice(startIndex, endIndex);
 
+  const openBulkDeletion = () => {
+    const search = searchTerm.trim();
+    const filters = [
+      currentPrograma !== 'ALL' && getProgramaLabel(currentPrograma),
+      search.length >= 3 && `Búsqueda: «${search}»`,
+    ].filter(Boolean);
+    setBulkSelection({
+      students,
+      pageStudents: paginatedStudents,
+      scopeLabel: filters.length ? filters.join(' · ') : 'Incluye todo el padrón, en todas las páginas.',
+    });
+  };
+
   return (
     <div className="animate-fade-in lg:flex lg:flex-col lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
+      {bulkSelection && bajas.puedeEliminar && (
+        <BulkDeleteStudentsDialog
+          {...bulkSelection}
+          onClose={() => setBulkSelection(null)}
+          onDeleted={ids => {
+            if (ids.includes(selectedStudent?.id)) setSelectedStudent(null);
+            handleSearch(searchTerm);
+            cargarResumenAdmision();
+          }}
+        />
+      )}
       <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-primary via-primary-dark to-secondary p-5 sm:p-6 mb-6 shadow-xl shadow-primary/25 lg:shrink-0">
         <div
           className="absolute inset-0 bg-cover bg-center pointer-events-none"
@@ -1363,16 +1521,36 @@ export function StudentMaster() {
                   onChange={(e) => procesarExcelAdmision(e.target.files?.[0])}
                 />
                 <button
-                  className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-white/15 border border-white/30 text-white font-semibold text-sm backdrop-blur-sm hover:bg-white/25 active:scale-[0.98] transition-all duration-200 min-h-[44px] w-full sm:w-auto disabled:opacity-70 disabled:cursor-wait disabled:active:scale-100"
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/10 border border-white/25 text-white font-semibold text-sm backdrop-blur-sm hover:bg-white/20 active:scale-[0.98] transition-all duration-200 min-h-[44px] w-full sm:w-auto disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100"
+                  onClick={abrirSelectorExcelAdmision}
+                  disabled={syncing}
+                  aria-busy={syncAction === 'excel'}
+                  title="Publica un nuevo Excel de resultados de Admisión (ADMISION_2026.xlsx) y registra a los ingresantes"
+                >
+                  {syncAction === 'excel'
+                    ? <Loader2 size={18} className="shrink-0 animate-spin" />
+                    : <FileSpreadsheet size={18} className="shrink-0" />}
+                  <span className="whitespace-nowrap">{syncAction === 'excel' ? (syncStep || 'Cargar Excel') : 'Cargar Excel'}</span>
+                </button>
+                <button
+                  className="relative inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-white/15 border border-white/30 text-white font-semibold text-sm backdrop-blur-sm hover:bg-white/25 active:scale-[0.98] transition-all duration-200 min-h-[44px] w-full sm:w-auto disabled:opacity-70 disabled:cursor-wait disabled:active:scale-100"
                   onClick={handleSincronizar}
                   disabled={syncing}
-                  aria-busy={syncing}
-                  title="Carga el Excel de resultados de Admisión y registra a los ingresantes"
+                  aria-busy={syncAction === 'admision'}
+                  title="Registra como estudiantes a los ingresantes publicados por Admisión"
                 >
-                  {syncing
+                  {syncAction === 'admision'
                     ? <Loader2 size={18} className="shrink-0 animate-spin" />
                     : <CloudDownload size={18} className="shrink-0" />}
-                  <span className="whitespace-nowrap">{syncing ? (syncStep || 'Sincronizando…') : 'Sincronizar desde Admisión'}</span>
+                  <span className="whitespace-nowrap">{syncAction === 'admision' ? (syncStep || 'Sincronizando…') : 'Sincronizar desde Admisión'}</span>
+                  {!syncing && admisionResumen?.pendientes > 0 && (
+                    <span
+                      className="absolute -top-2 -right-2 min-w-[22px] h-[22px] px-1.5 rounded-full bg-amber-400 text-amber-950 text-[11px] font-bold flex items-center justify-center shadow ring-2 ring-white/70"
+                      aria-label={`${admisionResumen.pendientes} ingresantes pendientes`}
+                    >
+                      {admisionResumen.pendientes > 999 ? '999+' : admisionResumen.pendientes}
+                    </span>
+                  )}
                 </button>
               </>
             )}
@@ -1433,6 +1611,34 @@ export function StudentMaster() {
         </div>
       </div>
 
+      {esAdminAdmision && admisionResumen?.pendientes > 0 && (
+        <div
+          className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 flex flex-col sm:flex-row sm:items-center gap-3 lg:shrink-0"
+          role="status"
+          data-testid="admision-pendientes-banner"
+        >
+          <div className="flex items-start gap-3 flex-1">
+            <Info size={18} className="shrink-0 mt-0.5 text-amber-600" />
+            <div>
+              <p className="font-semibold">
+                Admisión tiene {admisionResumen.pendientes} ingresante{admisionResumen.pendientes === 1 ? '' : 's'} pendiente{admisionResumen.pendientes === 1 ? '' : 's'} de registrar
+              </p>
+              <p className="mt-0.5 text-amber-800">
+                Las filas se retiran de Admisión a medida que se registran en el padrón.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={handleSincronizar}
+            disabled={syncing}
+            className="shrink-0 inline-flex items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-2 font-semibold text-white hover:bg-amber-600 disabled:opacity-60 disabled:cursor-wait"
+          >
+            {syncAction === 'admision' ? <Loader2 size={16} className="animate-spin" /> : <UserPlus size={16} />}
+            {syncAction === 'admision' ? (syncStep || 'Registrando…') : 'Registrar ahora'}
+          </button>
+        </div>
+      )}
+
       {loadError && (
         <div className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 flex items-start gap-3 lg:shrink-0">
           <AlertTriangle size={18} className="shrink-0 mt-0.5" />
@@ -1470,7 +1676,17 @@ export function StudentMaster() {
             )}
           </div>
 
-          <div className="flex items-center gap-2 text-xs font-bold text-slate-600">
+          <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-slate-600">
+            {bajas.puedeEliminar && (
+              <button
+                type="button"
+                onClick={openBulkDeletion}
+                disabled={loading || !!loadError || !totalStudents}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 font-bold text-rose-800 transition-colors hover:border-rose-300 hover:bg-rose-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Trash2 size={15} aria-hidden="true" /> Eliminar por lotes
+              </button>
+            )}
             <span className="hidden sm:inline text-slate-500 font-semibold">Mostrar:</span>
             <select
               value={pageSize}

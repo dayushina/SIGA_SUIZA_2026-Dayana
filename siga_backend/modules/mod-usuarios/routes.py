@@ -8,6 +8,14 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 import bcrypt
 from database import get_db, OutboxEvent
 from models import Usuario, Rol, Permiso, PerfilPersonal
+from pathlib import Path
+import sys
+
+backend_dir = str(Path(__file__).resolve().parents[2])
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
+from shared.programas import programa_implementado
 
 
 def _hash_password(password: str) -> str:
@@ -37,6 +45,7 @@ class UsuarioBase(BaseModel):
 class UsuarioCreate(UsuarioBase):
     password: str
     role_ids: List[int] = []
+    programa_estudio_id: Optional[int] = None
 
 class UsuarioUpdate(BaseModel):
     email: Optional[EmailStr] = None
@@ -44,11 +53,13 @@ class UsuarioUpdate(BaseModel):
     is_active: Optional[bool] = None
     is_superuser: Optional[bool] = None
     role_ids: Optional[List[int]] = None
+    programa_estudio_id: Optional[int] = None
 
 class UsuarioResponse(UsuarioBase):
     id: int
     created_at: datetime
     roles: List[RolResponse] = []
+    programa_estudio_id: Optional[int] = None
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -128,16 +139,31 @@ async def obtener_roles(db: AsyncSession = Depends(get_db)):
 
 
 # --- CRUD Usuarios ---
+def _usuarios_con_perfil():
+    return select(Usuario).options(selectinload(Usuario.roles), selectinload(Usuario.perfil_personal))
+
+
+async def _asignar_programa_secretaria(db, usuario, programa_id):
+    await programa_implementado(db, programa_id)
+    perfil = await db.scalar(select(PerfilPersonal).where(PerfilPersonal.user_id == usuario.id))
+    if perfil is None:
+        perfil = PerfilPersonal(
+            user_id=usuario.id, cargo_funcional="SECRETARIA_PROGRAMA", condicion_laboral="NO_INFORMADO",
+        )
+        db.add(perfil)
+    perfil.programa_estudio_id = programa_id
+
+
 @router.post("/usuarios", response_model=UsuarioResponse, status_code=status.HTTP_201_CREATED)
 async def crear_usuario(usuario: UsuarioCreate, request: Request, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Usuario).where(Usuario.email == usuario.email))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="El email ya está registrado")
 
-    user_data = usuario.model_dump(exclude={"password", "role_ids"})
+    user_data = usuario.model_dump(exclude={"password", "role_ids", "programa_estudio_id"})
     hashed_password = _hash_password(usuario.password)
     
-    db_user = Usuario(**user_data, hashed_password=hashed_password)
+    db_user = Usuario(**user_data, hashed_password=hashed_password, roles=[])
     
     # Asignar roles
     if usuario.role_ids:
@@ -146,6 +172,8 @@ async def crear_usuario(usuario: UsuarioCreate, request: Request, db: AsyncSessi
 
     db.add(db_user)
     await db.flush()
+    if any(rol.name == "secretaria_programa" for rol in db_user.roles):
+        await _asignar_programa_secretaria(db, db_user, usuario.programa_estudio_id)
 
     request_id = request.headers.get("X-Request-ID", "unknown")
     event = OutboxEvent(
@@ -162,21 +190,21 @@ async def crear_usuario(usuario: UsuarioCreate, request: Request, db: AsyncSessi
     
     # Recargar con relaciones
     result = await db.execute(
-        select(Usuario).options(selectinload(Usuario.roles)).where(Usuario.id == db_user.id)
+        _usuarios_con_perfil().where(Usuario.id == db_user.id)
     )
     return result.scalar_one()
 
 @router.get("/usuarios", response_model=List[UsuarioResponse])
 async def obtener_usuarios(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Usuario).options(selectinload(Usuario.roles)).order_by(Usuario.created_at.desc())
+        _usuarios_con_perfil().order_by(Usuario.created_at.desc())
     )
     return result.scalars().all()
 
 @router.get("/usuarios/{usuario_id}", response_model=UsuarioResponse)
 async def obtener_usuario(usuario_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Usuario).options(selectinload(Usuario.roles)).where(Usuario.id == usuario_id)
+        _usuarios_con_perfil().where(Usuario.id == usuario_id)
     )
     user = result.scalar_one_or_none()
     if not user:
@@ -186,13 +214,14 @@ async def obtener_usuario(usuario_id: int, db: AsyncSession = Depends(get_db)):
 @router.put("/usuarios/{usuario_id}", response_model=UsuarioResponse)
 async def actualizar_usuario(usuario_id: int, usuario: UsuarioUpdate, request: Request, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Usuario).options(selectinload(Usuario.roles)).where(Usuario.id == usuario_id)
+        _usuarios_con_perfil().where(Usuario.id == usuario_id).with_for_update()
     )
     db_user = result.scalar_one_or_none()
     if not db_user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
     update_data = usuario.model_dump(exclude_unset=True)
+    programa_id = update_data.pop("programa_estudio_id", db_user.programa_estudio_id)
     
     if "email" in update_data and update_data["email"] != db_user.email:
         email_check = await db.execute(select(Usuario).where(Usuario.email == update_data["email"]))
@@ -202,8 +231,12 @@ async def actualizar_usuario(usuario_id: int, usuario: UsuarioUpdate, request: R
     # Actualizar roles
     if "role_ids" in update_data:
         role_ids = update_data.pop("role_ids")
-        roles_result = await db.execute(select(Rol).where(Rol.id.in_(role_ids)))
+        roles_result = await db.execute(select(Rol).where(Rol.id.in_(role_ids or [])))
         db_user.roles = roles_result.scalars().all()
+    if any(rol.name == "secretaria_programa" for rol in db_user.roles) and (
+        {"role_ids", "programa_estudio_id"} & usuario.model_fields_set
+    ):
+        await _asignar_programa_secretaria(db, db_user, programa_id)
 
     # Actualizar campos
     for key, value in update_data.items():
@@ -216,8 +249,7 @@ async def actualizar_usuario(usuario_id: int, usuario: UsuarioUpdate, request: R
     )
     db.add(event)
     await db.commit()
-    await db.refresh(db_user)
-    return db_user
+    return await db.scalar(_usuarios_con_perfil().where(Usuario.id == usuario_id).execution_options(populate_existing=True))
 
 @router.delete("/usuarios/{usuario_id}")
 async def eliminar_usuario(usuario_id: int, request: Request, db: AsyncSession = Depends(get_db)):
@@ -242,6 +274,8 @@ async def eliminar_usuario(usuario_id: int, request: Request, db: AsyncSession =
 # --- CRUD Personal Institucional ---
 @router.post("/personal", response_model=PersonalResponse, status_code=status.HTTP_201_CREATED)
 async def registrar_personal(personal: PersonalCreate, request: Request, db: AsyncSession = Depends(get_db)):
+    if personal.cargo_funcional == "SECRETARIA_PROGRAMA":
+        await programa_implementado(db, personal.programa_estudio_id)
     # Validar email
     result = await db.execute(select(Usuario).where(Usuario.email == personal.email))
     if result.scalar_one_or_none():
@@ -320,6 +354,8 @@ async def actualizar_personal(perfil_id: int, personal: PersonalUpdate, request:
 
     db_user = db_perfil.usuario
     update_data = personal.model_dump(exclude_unset=True)
+    if update_data.get("cargo_funcional", db_perfil.cargo_funcional) == "SECRETARIA_PROGRAMA":
+        await programa_implementado(db, update_data.get("programa_estudio_id", db_perfil.programa_estudio_id))
 
     # Actualizar campos de Usuario
     if "email" in update_data and update_data["email"] != db_user.email:

@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from config import enrollment_settings
+from autorizacion import exigir_rol, validar_estudiante_secretaria
 from database import OutboxEvent, get_db
 from domain import (
     Casuistica,
@@ -48,6 +49,8 @@ from models import (
     MatriculaDetalle,
     ResolucionConvalidacion,
 )
+from nomina_matriculados import leer_nomina_matriculados, normalizar
+from starlette.concurrency import run_in_threadpool
 router = APIRouter()
 
 APROBATORIOS = {EstadoCurso.APROBADO.value, EstadoCurso.CONVALIDADO.value}
@@ -72,13 +75,15 @@ def publicar(db: AsyncSession, event_type: str, data: dict, request: Request = N
     db.add(OutboxEvent(event_type=event_type, payload=payload))
 
 
-async def _obtener_matricula(db: AsyncSession, matricula_id: int) -> Matricula:
-    result = await db.execute(
+async def _obtener_matricula(db: AsyncSession, matricula_id: int, *, bloquear: bool = False) -> Matricula:
+    consulta = (
         select(Matricula)
         .options(selectinload(Matricula.detalles))
         .where(Matricula.id == matricula_id)
     )
-    matricula = result.scalar_one_or_none()
+    if bloquear:
+        consulta = consulta.with_for_update()
+    matricula = (await db.execute(consulta)).scalar_one_or_none()
     if not matricula:
         raise HTTPException(status_code=404, detail="Matrícula no encontrada")
     return matricula
@@ -225,12 +230,145 @@ class MatricularIngresantesRequest(BaseModel):
     estudiante_ids: Optional[List[int]] = None
 
 
+async def procesar_nomina_historica(request, db, nomina, programa_id, periodo_id, dry_run):
+    actor = await exigir_rol(request, db, frozenset(), "importar matrículas históricas")
+    codigo = nomina["codigo"]
+    romano = "I" if nomina["semestre"] == 1 else "II"
+    alternativas = [codigo, f"{nomina['anio']}-{romano}"]
+    periodos = (await db.execute(text("""
+        SELECT id, codigo, estado FROM periodos_academicos
+        WHERE upper(trim(codigo)) = ANY(CAST(:codigos AS varchar[]))
+    """), {"codigos": alternativas})).mappings().all()
+    periodo = next((p for p in periodos if p["id"] == periodo_id), None) if periodo_id else (
+        periodos[0] if len(periodos) == 1 else None
+    )
+    error_periodo = None
+    if not periodos:
+        error_periodo = f"Falta configurar el periodo histórico {codigo}."
+    elif periodo is None:
+        error_periodo = f"Selecciona el periodo histórico {codigo} correspondiente al Excel."
+    elif periodo["estado"] not in {"cerrado", "historico"}:
+        error_periodo = f"El periodo {periodo['codigo']} debe estar cerrado para importar esta nómina histórica."
+
+    if not dry_run:
+        if error_periodo:
+            raise HTTPException(409, detail=error_periodo)
+        await db.execute(text("SELECT pg_advisory_xact_lock(202601, :periodo)"), {"periodo": periodo["id"]})
+
+    unidades = (await db.execute(text("""
+        SELECT p.id AS programa_id, p.nombre, p.codigo, p.plan_estudio_id, m.periodo AS ciclo,
+               u.id AS unidad_id, u.creditos
+        FROM programas_estudio p
+        JOIN programa_modulos m ON m.programa_id = p.id
+        JOIN programa_unidades u ON u.programa_modulo_id = m.id
+        WHERE p.estado = 'activo' AND p.plan_estudio_id IS NOT NULL
+        ORDER BY p.id, m.periodo, u.id
+    """))).mappings().all()
+    programas, mallas = {}, {}
+    for unidad in unidades:
+        programas.setdefault(normalizar(unidad["nombre"]), {})[unidad["programa_id"]] = unidad
+        mallas.setdefault((unidad["programa_id"], unidad["ciclo"]), []).append(unidad)
+
+    consulta = select(Estudiante).where(Estudiante.dni.in_([r["dni"] for r in nomina["registros"]])).order_by(Estudiante.id)
+    if not dry_run:
+        consulta = consulta.with_for_update()
+    estudiantes = {est.dni: est for est in (await db.scalars(consulta)).all()}
+    matr_vigentes = {}
+    if periodo and estudiantes:
+        vigentes = await db.scalars(select(Matricula).where(
+            Matricula.periodo_id == periodo["id"],
+            Matricula.estudiante_id.in_([est.id for est in estudiantes.values()]),
+            Matricula.estado_matricula.notin_(EstadoMatricula.anuladas()),
+        ))
+        for matricula in vigentes:
+            matr_vigentes.setdefault(matricula.estudiante_id, []).append(matricula)
+
+    preview = []
+    for reg in nomina["registros"]:
+        opciones = programas.get(reg["programa_nombre"], {})
+        prog = next(iter(opciones.values())) if len(opciones) == 1 else None
+        malla = mallas.get((prog["programa_id"], reg["ciclo"]), []) if prog else []
+        est = estudiantes.get(reg["dni"])
+        previas = matr_vigentes.get(est.id, []) if est else []
+        motivo = None
+        if not prog:
+            motivo = "Programa sin malla implementada o con nombre ambiguo."
+        elif programa_id and programa_id != prog["programa_id"]:
+            motivo = "El programa elegido no coincide con el encabezado de la hoja."
+        elif not malla:
+            motivo = "El programa no tiene unidades implementadas para este ciclo."
+        elif previas and (len(previas) != 1 or any(
+            m.programa_id != prog["programa_id"] or m.ciclo != reg["ciclo"] for m in previas
+        )):
+            motivo = "Hay una matrícula vigente con otro programa o ciclo en este periodo."
+        preview.append({
+            **reg, "programa_id": prog["programa_id"] if prog else None,
+            "unidades": len(malla), "existe": est is not None, "ya_matriculado": bool(previas) and not motivo,
+            "motivo": motivo,
+        })
+
+    bloqueados = sum(bool(r["motivo"]) for r in preview)
+    if dry_run:
+        return {
+            "modo": "nomina_historica", "periodo_codigo": codigo,
+            "periodo_id": periodo["id"] if periodo else None, "advertencia": error_periodo,
+            "bloqueados": bloqueados, "registros": preview, "total": len(preview),
+            "nuevos": len(preview) - len(estudiantes), "existentes": len(estudiantes),
+        }
+    if bloqueados:
+        raise HTTPException(409, detail=f"La nómina tiene {bloqueados} filas con observaciones. Revisa la vista previa.")
+
+    creados, detalle, omitidas = 0, [], []
+    for fila in preview:
+        est = estudiantes.get(fila["dni"])
+        if fila["ya_matriculado"]:
+            omitidas.append({"estudiante_id": est.id, "motivo": "La matrícula ya está registrada."})
+            continue
+        malla = mallas[fila["programa_id"], fila["ciclo"]]
+        if not est:
+            est = Estudiante(
+                dni=fila["dni"], codigo_estudiante=f"{nomina['anio']}-{fila['dni']}",
+                nombres=fila["nombres"], apellidos=fila["apellidos"],
+                programa_id=fila["programa_id"], plan_estudios_id=malla[0]["plan_estudio_id"],
+                estado_academico="historico", ciclo_actual=fila["ciclo"],
+            )
+            db.add(est)
+            await db.flush()
+            creados += 1
+        matricula = Matricula(
+            estudiante_id=est.id, programa_id=fila["programa_id"], periodo_id=periodo["id"],
+            ciclo=fila["ciclo"], estado_matricula=EstadoMatricula.CONFIRMADA.value,
+            observaciones=f"Nómina histórica {codigo} – hoja {fila['hoja']}, fila {fila['fila']}.",
+        )
+        db.add(matricula)
+        await db.flush()
+        db.add_all(MatriculaDetalle(
+            matricula_id=matricula.id, unidad_didactica_id=unidad["unidad_id"],
+            creditos=unidad["creditos"] or 0, estado_curso=EstadoCurso.CURSANDO.value,
+        ) for unidad in malla)
+        detalle.append({
+            "matricula_id": matricula.id, "estudiante_id": est.id, "codigo_estudiante": est.codigo_estudiante,
+            "programa_id": fila["programa_id"], "ciclo": fila["ciclo"], "unidades": len(malla),
+        })
+    if detalle:
+        publicar(db, "gestion_academica.matriculas.historicas_importadas", {
+            "periodo_id": periodo["id"], "periodo_codigo": codigo,
+            "matriculas_ids": [r["matricula_id"] for r in detalle], "registrado_por": actor.etiqueta,
+        }, request)
+    await db.commit()
+    return {
+        "modo": "nomina_historica", "periodo_codigo": codigo, "estudiantes_creados": creados,
+        "estudiantes_existentes": len(estudiantes),
+        "matricula": {"matriculados": len(detalle), "detalle": detalle, "omitidas": omitidas, "sin_malla": []},
+    }
+
+
 @router.post("/admision/upload-excel", status_code=status.HTTP_201_CREATED)
 async def admision_excel(
     request: Request,
     file: UploadFile = File(...),
     programa_id: Optional[int] = None,
-    periodo_id: int = 1,
+    periodo_id: Optional[int] = None,
     matricular: bool = True,
     dry_run: bool = False,
     db: AsyncSession = Depends(get_db),
@@ -246,6 +384,13 @@ async def admision_excel(
         raise HTTPException(status_code=400, detail="El archivo debe ser .xlsx, .xls o .json")
     contenido = await file.read()
     try:
+        nomina = None if nombre.endswith(".json") else await run_in_threadpool(
+            leer_nomina_matriculados, contenido, file.filename
+        )
+        if nomina:
+            if not (dry_run or matricular):
+                raise HTTPException(400, detail="Para revisar la nómina sin registrarla, usa Vista previa.")
+            return await procesar_nomina_historica(request, db, nomina, programa_id, periodo_id, dry_run)
         registros = (
             parse_json_ingresantes(contenido) if nombre.endswith(".json")
             else parse_excel_ingresantes(contenido)
@@ -256,7 +401,10 @@ async def admision_excel(
     if not registros:
         raise HTTPException(status_code=400, detail="No se encontraron ingresantes con DNI en el archivo.")
 
+    periodo_id = periodo_id or 1
     periodo_info = await fetch_periodo(periodo_id)
+    if not dry_run and periodo_info and periodo_info.get("estado") in {"historico", "cerrado"}:
+        raise HTTPException(409, detail="El periodo cerrado solo admite nóminas históricas.")
     codigo_periodo = periodo_info.get("codigo") if periodo_info else f"ID {periodo_id}"
     es_inicio = es_periodo_inicio_anio(codigo_periodo)
 
@@ -498,6 +646,7 @@ async def obtener_ficha(estudiante_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.get("/matriculas/propuesta")
 async def propuesta_matricula(
+    request: Request,
     estudiante_id: int,
     programa_id: int,
     periodo_id: int,
@@ -510,6 +659,7 @@ async def propuesta_matricula(
     ``estrategia`` permite forzar ``flexible`` o ``strict``; por defecto usa la
     configuración del entorno (``ENROLLMENT_ENGINE``).
     """
+    await validar_estudiante_secretaria(request, db, estudiante_id, programa_id)
     ctx = await construir_contexto(
         db, estudiante_id, programa_id, periodo_id,
         estrategia=estrategia, casuistica=casuistica,
@@ -806,7 +956,9 @@ def _generar_codigo_boleta(periodo_id: int) -> str:
 @router.post("/matriculas/{matricula_id}/boleta")
 async def emitir_boleta(matricula_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """Emite (idempotente) la boleta con código QR único de la matrícula."""
-    matricula = await _obtener_matricula(db, matricula_id)
+    matricula = await _obtener_matricula(db, matricula_id, bloquear=True)
+    if matricula.estado_matricula in EstadoMatricula.anuladas():
+        raise HTTPException(409, detail="La matrícula está anulada. No se puede emitir la boleta.")
     if not matricula.boleta_codigo:
         matricula.boleta_codigo = _generar_codigo_boleta(matricula.periodo_id)
         matricula.boleta_emitida_en = datetime.utcnow()
@@ -941,7 +1093,9 @@ async def validar_boleta(codigo: str, db: AsyncSession = Depends(get_db)):
 @router.post("/matriculas/{matricula_id}/consolidar")
 async def consolidar_matricula(matricula_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """Cierra el proceso de matrícula en los 5 pasos del diagrama."""
-    matricula = await _obtener_matricula(db, matricula_id)
+    matricula = await _obtener_matricula(db, matricula_id, bloquear=True)
+    if matricula.estado_matricula in EstadoMatricula.anuladas():
+        raise HTTPException(409, detail="La matrícula está anulada. No se puede consolidar.")
     pasos = []
 
     # 1. Consolidar matrícula + registro académico
