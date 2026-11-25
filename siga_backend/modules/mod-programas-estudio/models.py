@@ -40,7 +40,7 @@ class DocentePeriodo(Base):
     __tablename__ = "docentes_periodo"
 
     programa_id = Column(Integer, ForeignKey("programas_estudio.id", ondelete="CASCADE"), primary_key=True)
-    periodo_id = Column(Integer, ForeignKey("periodos_academicos.id", ondelete="CASCADE"), primary_key=True)
+    periodo_id = Column(Integer, ForeignKey("periodos_academicos.id", ondelete="RESTRICT"), primary_key=True)
     docente_id = Column(Integer, primary_key=True, index=True)  # Referencia a core_users
 
 

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, status, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select, func, delete, text, table, column
 from typing import List, Optional
 from datetime import datetime, date
@@ -10,6 +11,7 @@ from shared.identity import (
     Identity, get_identity, es_superadmin, es_coordinador_de, es_coordinador_de_docente
 )
 from shared.programas import programa_implementado
+from shared.periodos import DEPENDENCIAS_PERIODO, referencias_periodo, restringe_borrado
 from schemas import (
     SilaboUpdate, PlanTrabajoDocenteUpdate, CargaLectivaUpdate, HorarioPeriodoUpdate
 )
@@ -132,13 +134,14 @@ async def crear_periodo(periodo: PeriodoCreate, request: Request, db: AsyncSessi
     return db_periodo
 
 @router.get("/periodos", response_model=List[PeriodoResponse])
-async def obtener_periodos(db: AsyncSession = Depends(get_db)):
+async def obtener_periodos(response: Response, db: AsyncSession = Depends(get_db)):
+    response.headers["Cache-Control"] = "no-store"
     result = await db.execute(select(PeriodoAcademico).order_by(PeriodoAcademico.fecha_inicio.desc()))
     return result.scalars().all()
 
 @router.put("/periodos/{periodo_id}/estado", response_model=PeriodoResponse)
 async def actualizar_estado_periodo(periodo_id: int, estado: str, request: Request, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(PeriodoAcademico).where(PeriodoAcademico.id == periodo_id))
+    result = await db.execute(select(PeriodoAcademico).where(PeriodoAcademico.id == periodo_id).with_for_update())
     db_periodo = result.scalar_one_or_none()
     if not db_periodo:
         raise HTTPException(status_code=404, detail="Periodo no encontrado")
@@ -158,6 +161,57 @@ async def actualizar_estado_periodo(periodo_id: int, estado: str, request: Reque
     await db.commit()
     await db.refresh(db_periodo)
     return db_periodo
+
+
+@router.delete("/periodos/{periodo_id}")
+async def eliminar_periodo(periodo_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    actor = await get_identity(request, db)
+    if not es_superadmin(actor):
+        raise HTTPException(403, detail="Solo el superadministrador puede eliminar periodos académicos.")
+
+    periodo = await db.get(PeriodoAcademico, periodo_id, with_for_update=True)
+    if periodo is None:
+        raise HTTPException(404, detail="El periodo académico ya no existe.")
+
+    referencias = await referencias_periodo(db)
+    if any(not restringe_borrado(claves) for claves in referencias.values()):
+        raise HTTPException(503, detail="La protección de referencias del calendario todavía no está disponible.")
+
+    bloqueos = []
+    for tabla, (etiqueta, columnas) in DEPENDENCIAS_PERIODO.items():
+        condiciones = " OR ".join(f"{columna} = :id" for columna in columnas if (tabla, columna) in referencias)
+        if condiciones:
+            cantidad = await db.scalar(
+                text(f"SELECT count(*) FROM public.{tabla} WHERE {condiciones}"), {"id": periodo_id}
+            )
+            if cantidad:
+                bloqueos.append(f"{etiqueta} ({cantidad})")
+    if bloqueos:
+        raise HTTPException(
+            409, detail=f"El periodo {periodo.codigo} tiene registros vinculados: {', '.join(bloqueos)}."
+        )
+
+    codigo = periodo.codigo
+    await db.delete(periodo)
+    db.add(OutboxEvent(
+        event_type="periodo.eliminado",
+        payload={
+            "id": periodo_id,
+            "codigo": codigo,
+            "estado": periodo.estado,
+            "eliminado_por": actor.user_id,
+            "metadata": {"request_id": request.headers.get("X-Request-ID", "unknown")},
+        },
+    ))
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if getattr(exc.orig, "sqlstate", None) != "23503":
+            raise
+        raise HTTPException(409, detail=f"El periodo {codigo} tiene otros registros vinculados.") from exc
+    return {"id": periodo_id, "message": f"Periodo {codigo} eliminado."}
+
 
 @router.get("/programas", response_model=List[ProgramaResponse])
 async def obtener_programas(implementados: bool = False, db: AsyncSession = Depends(get_db)):

@@ -9,7 +9,8 @@ if _app_root not in sys.path:
     sys.path.insert(0, _app_root)
 
 from routes import router
-from database import init_db
+from database import engine, init_db
+from shared.periodos import asegurar_integridad_periodos
 import asyncio
 from outbox_worker import outbox_worker
 
@@ -49,6 +50,7 @@ async def startup():
     for attempt in range(5):
         try:
             await init_db()
+            await asegurar_integridad_periodos(engine)
             break
         except Exception as e:
             print(f"Intento {attempt + 1}/5 fallido al conectar con BD: {e}. Reintentando en 2s...")

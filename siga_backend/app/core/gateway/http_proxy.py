@@ -61,6 +61,8 @@ class HTTPGateway:
             or (module_name == "mod-gestion-academica" and ruta == "estudiantes")
             or (module_name == "mod-programas-estudio" and (
                 ruta.endswith("/docentes-disponibles")
+                or ruta == "periodos"
+                or ruta.startswith("periodos/")
                 or (ruta == "programas" and "implementados" in request.query_params)
             ))
             or (module_name == "mod-usuarios" and (ruta == "usuarios" or ruta.startswith("usuarios/")))

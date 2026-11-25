@@ -3,7 +3,8 @@ import os
 from routes import router
 from matricula_routes import router as matricula_router
 from tesoreria_routes import router as tesoreria_router, asegurar_esquema_tesoreria
-from database import init_db, ensure_schema
+from database import engine, init_db, ensure_schema
+from shared.periodos import asegurar_integridad_periodos
 import asyncio
 from outbox_worker import outbox_worker
 
@@ -37,6 +38,7 @@ async def startup():
     await init_db()
     await ensure_schema()  # columnas agregadas a tablas existentes (antes nunca se invocaba)
     await asegurar_esquema_tesoreria()
+    await asegurar_integridad_periodos(engine)
     asyncio.create_task(outbox_worker())
 
 if __name__ == "__main__":
