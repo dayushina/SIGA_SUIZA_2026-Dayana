@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 async def programa_implementado(db: AsyncSession, programa_id: int | None) -> str:
     if programa_id is None:
-        raise HTTPException(422, detail="Asigna un programa de estudios a la cuenta de Secretaría de Programa.")
+        raise HTTPException(422, detail="Asigna un programa de estudios a esta cuenta.")
     nombre = await db.scalar(text("""
         SELECT p.nombre FROM programas_estudio p
         WHERE p.id = :id AND p.estado = 'activo' AND p.plan_estudio_id IS NOT NULL

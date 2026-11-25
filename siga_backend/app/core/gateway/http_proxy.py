@@ -59,6 +59,11 @@ class HTTPGateway:
         requiere_datos_actuales = (
             (module_name == "mod-admision" and ruta in {"admitidos", "resumen"})
             or (module_name == "mod-gestion-academica" and ruta == "estudiantes")
+            or (module_name == "mod-programas-estudio" and (
+                ruta.endswith("/docentes-disponibles")
+                or (ruta == "programas" and "implementados" in request.query_params)
+            ))
+            or (module_name == "mod-usuarios" and (ruta == "usuarios" or ruta.startswith("usuarios/")))
         )
         use_cached_fallback = self.resilience_enabled and not requiere_datos_actuales
 

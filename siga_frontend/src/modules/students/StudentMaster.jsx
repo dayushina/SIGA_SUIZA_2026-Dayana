@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from 'react';
 import { createPortal } from 'react-dom';
 import { useAuth } from '../../core/auth/useAuth';
 import { API_BASE } from '../../core/api/client';
-import { PROGRAMAS_ESTUDIANTE, PROGRAMAS_ESTUDIANTE_LISTA } from '../../core/constants/programas';
+import { PROGRAMAS_ESTUDIANTE } from '../../core/constants/programas';
 import { useToast } from '../../core/ui/ToastContext';
 import { useBajasEstudiante } from './useBajasEstudiante';
 import { BulkDeleteStudentsDialog } from './BulkDeleteStudentsDialog';
@@ -11,7 +11,7 @@ import { EditStudentModal } from './EditStudentModal';
 import { StudentDetail } from './StudentDetail';
 import { ProtectedImage } from './ProtectedImage';
 import { DEPARTAMENTOS, getProvincias, getDistritos } from './ubigeoPeru';
-import { GraduationCap, Search, CloudDownload, Plus, Users, Pencil, ChevronRight, ChevronLeft, ChevronDown, Check, LayoutGrid, Info, X, Mail, Phone, MapPin, CheckCircle2, FileCheck2, UserPlus, Sparkles, Camera, Trash2, AlertTriangle, Eye, CreditCard, Loader2, FileSpreadsheet } from 'lucide-react';
+import { GraduationCap, Search, CloudDownload, Plus, Users, Pencil, ChevronRight, ChevronLeft, ChevronDown, Check, LayoutGrid, Info, X, Mail, Phone, MapPin, CheckCircle2, FileCheck2, UserPlus, Sparkles, Camera, Trash2, AlertTriangle, Eye, CreditCard, Loader2 } from 'lucide-react';
 
 const LOTE_INGESTA = 300;
 const authHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('token')}` });
@@ -417,29 +417,28 @@ const createEmptyStudentForm = (programaId = '') => ({
   documentos_completos: true, fecha_limite_documentos: ''
 });
 
-const PROGRAMAS = [
-  { id: 'ALL', label: 'Todos los Programas' },
-  ...PROGRAMAS_ESTUDIANTE_LISTA,
-];
-
-const PROGRAMAS_OPTIONS = [
-  { value: '', label: 'Seleccione una carrera...' },
-  ...PROGRAMAS.filter(programa => programa.id !== 'ALL').map(programa => ({
-    value: programa.id,
-    label: programa.label,
-  })),
-];
+const TODOS_LOS_PROGRAMAS = { id: 'ALL', label: 'Todos los Programas' };
 
 const TIPOS_SANGRE = ['O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-'];
 
-const getProgramaLabel = (programaId) => {
-  const programa = PROGRAMAS.find(item => item.id === String(programaId));
-  return programa ? programa.label : 'Sin carrera seleccionada';
+const programaDelEstudiante = (estudiante, programas) => {
+  if (estudiante.plan_estudios_id == null) {
+    const programaAdmision = Object.entries(estudiante.metadata_admision ?? {}).find(([clave, valor]) =>
+      clave.trim().replace(/\s+/g, ' ').toUpperCase() === 'PROGRAMA DE ESTUDIOS'
+      && typeof valor === 'string' && valor.trim()
+    );
+    if (programaAdmision) return programaAdmision[1].trim().replace(/\s+/g, ' ');
+  }
+  const { programa_id } = estudiante;
+  if (programa_id == null) return '';
+  return programas.find(p => p.id === String(programa_id))?.label
+    || PROGRAMAS_ESTUDIANTE[programa_id]
+    || `Programa ${programa_id}`;
 };
 
-const compareStudentsByCarrera = (a, b) => {
-  const carreraA = a.programa_id ? getProgramaLabel(a.programa_id) : '';
-  const carreraB = b.programa_id ? getProgramaLabel(b.programa_id) : '';
+const compareStudentsByCarrera = (a, b, programas) => {
+  const carreraA = programaDelEstudiante(a, programas);
+  const carreraB = programaDelEstudiante(b, programas);
   if (!carreraA !== !carreraB) return carreraA ? -1 : 1;
   const porCarrera = carreraA.localeCompare(carreraB, 'es', { sensitivity: 'base' });
   if (porCarrera !== 0) return porCarrera;
@@ -448,10 +447,11 @@ const compareStudentsByCarrera = (a, b) => {
   return String(a.nombres ?? '').localeCompare(String(b.nombres ?? ''), 'es', { sensitivity: 'base' });
 };
 
-function ProgramaFilter({ value, onChange }) {
+function ProgramaFilter({ value, onChange, programas, aviso }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef(null);
-  const selected = PROGRAMAS.find(p => String(p.id) === String(value)) || PROGRAMAS[0];
+  const opciones = [TODOS_LOS_PROGRAMAS, ...programas];
+  const selected = opciones.find(p => p.id === value) || TODOS_LOS_PROGRAMAS;
   const isAll = selected.id === 'ALL';
 
   useEffect(() => {
@@ -499,8 +499,9 @@ function ProgramaFilter({ value, onChange }) {
           <div className="px-4 py-2.5 bg-gradient-to-r from-primary/5 to-transparent border-b border-slate-100">
             <span className="text-[10px] font-bold uppercase tracking-wider text-primary/80">Filtrar por programa</span>
           </div>
+          {aviso && <p className="px-4 pt-2 text-xs text-slate-600" role="status">{aviso}</p>}
           <div className="max-h-72 overflow-y-auto custom-scrollbar p-1.5" role="listbox">
-            {PROGRAMAS.map(p => {
+            {opciones.map(p => {
               const active = String(p.id) === String(value);
               const all = p.id === 'ALL';
               return (
@@ -535,7 +536,22 @@ export function StudentMaster() {
   const userRoles = user?.roles ? user.roles.map(r => typeof r === 'string' ? r : r.nombre || r.name) : [];
   const primaryRole = user?.is_superuser ? 'superadmin' : (userRoles.length > 0 ? userRoles[0] : (user?.role || 'invitado'));
   const userRole = primaryRole;
-  const [students, setStudents] = useState([]);
+  const [resultados, setStudents] = useState([]);
+  const [programas, setProgramas] = useState([]);
+  const [catalogoEstado, setCatalogoEstado] = useState('cargando');
+  const students = useMemo(
+    () => [...resultados].sort((a, b) => compareStudentsByCarrera(a, b, programas)),
+    [resultados, programas],
+  );
+  const programasDisponibles = userRole === 'secretaria_programa'
+    ? programas.filter(p => p.id === String(user?.programa_id))
+    : programas;
+  const getProgramaLabel = (id) =>
+    programas.find(p => p.id === String(id))?.label ?? 'Programa no disponible';
+  const avisoCatalogo = {
+    cargando: 'Cargando programas implementados…',
+    error: 'No se pudieron consultar los programas implementados.',
+  }[catalogoEstado] || (programasDisponibles.length === 0 ? 'No hay programas implementados disponibles.' : '');
   const [loading, setLoading] = useState(false);
   const searchRequest = useRef(0);
   const [bulkSelection, setBulkSelection] = useState(null);
@@ -556,16 +572,40 @@ export function StudentMaster() {
 
   const [form, setForm] = useState(() => createEmptyStudentForm());
   const [submitting, setSubmitting] = useState(false);
-  const [syncAction, setSyncAction] = useState('');
-  const syncing = Boolean(syncAction);
+  const [syncing, setSyncing] = useState(false);
   const syncInProgress = useRef(false);
   const [syncStep, setSyncStep] = useState('');
   const [admisionResumen, setAdmisionResumen] = useState(null); // { total, pendientes, sincronizados }
   const summaryRequest = useRef(0);
-  const admisionFileRef = useRef(null);
   const [codeLoading, setCodeLoading] = useState(false);
 
   const [showMissing, setShowMissing] = useState(false);
+
+  useEffect(() => {
+    if (userRole === 'invitado') return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    setCatalogoEstado('cargando');
+    fetch(API_BASE + '/api/mod-programas-estudio/programas?implementados=true', {
+      headers: authHeaders(),
+      cache: 'no-store',
+      signal,
+    })
+      .then(async res => {
+        if (!res.ok || respuestaDegradada(res)) throw new Error('Catálogo no disponible');
+        const data = await res.json();
+        if (!Array.isArray(data)) throw new Error('Catálogo no válido');
+        if (signal.aborted) return;
+        setProgramas(data.map(p => ({ id: String(p.id), label: p.nombre })));
+        setCatalogoEstado('listo');
+      })
+      .catch(() => {
+        if (signal.aborted) return;
+        setProgramas([]);
+        setCatalogoEstado('error');
+      });
+    return () => controller.abort();
+  }, [userRole]);
 
   useEffect(() => {
     if (wizardBodyRef.current) {
@@ -585,9 +625,8 @@ export function StudentMaster() {
   const missingBySector = (stepId) => (SECTOR_REQUIRED[stepId] || []).filter(isFieldMissing);
   const sectorHasMissing = (stepId) => missingBySector(stepId).length > 0;
   const defaultProgramaId = () => {
-    if (currentPrograma !== 'ALL') return currentPrograma;
-    if (form.programa_id) return form.programa_id;
-    return user?.programa_id ? String(user.programa_id) : '';
+    const id = currentPrograma !== 'ALL' ? currentPrograma : (form.programa_id || String(user?.programa_id ?? ''));
+    return programasDisponibles.some(p => p.id === id) ? id : '';
   };
 
   const generarCodigoLocalUnico = () => {
@@ -657,7 +696,7 @@ export function StudentMaster() {
       let url = `${API_BASE}/api/mod-gestion-academica/estudiantes/`;
 
       if (currentPrograma && currentPrograma !== 'ALL') {
-        url += `?programa_id=${currentPrograma}`;
+        url += '?' + new URLSearchParams({ programa_id: currentPrograma, catalogo_implementado: 'true' });
       }
 
       const res = await fetch(url, {
@@ -690,12 +729,10 @@ export function StudentMaster() {
       const data = await res.json();
       if (requestId !== searchRequest.current) return;
       const dataArray = Array.isArray(data) ? data : [];
-      const sorted = [...dataArray].sort(compareStudentsByCarrera);
-
       const term = String(val || '').trim();
       if (term.length >= 3) {
         const lowerTerm = term.toLowerCase();
-        const filtered = sorted.filter(s => {
+        const filtered = dataArray.filter(s => {
           const dni = String(s.dni ?? '');
           const nombres = String(s.nombres ?? '').toLowerCase();
           const apellidos = String(s.apellidos ?? '').toLowerCase();
@@ -707,7 +744,7 @@ export function StudentMaster() {
         });
         setStudents(filtered);
       } else {
-        setStudents(sorted);
+        setStudents(dataArray);
       }
     } catch (e) {
       if (requestId !== searchRequest.current) return;
@@ -775,6 +812,11 @@ export function StudentMaster() {
       setWizardStep(firstInvalid.id);
       return;
     }
+    if (!programasDisponibles.some(p => p.id === form.programa_id)) {
+      toast.warning(avisoCatalogo || 'Selecciona un programa de estudios implementado.');
+      setWizardStep(1);
+      return;
+    }
 
     const token = localStorage.getItem('token');
     if (!token) {
@@ -785,9 +827,6 @@ export function StudentMaster() {
 
     setSubmitting(true);
     try {
-      const programaId = form.programa_id
-        || (currentPrograma !== 'ALL' ? currentPrograma : (user?.programa_id ? String(user.programa_id) : ''));
-
       const metadata_admision = {
         departamento: form.departamento || null,
         provincia: form.provincia || null,
@@ -841,7 +880,7 @@ export function StudentMaster() {
         nombres: String(form.nombres || '').trim(),
         apellidos: String(form.apellidos || '').trim(),
         fecha_nacimiento: form.fecha_nacimiento || null,
-        programa_id: programaId ? Number(programaId) : null,
+        programa_id: Number(form.programa_id),
         email_institucional: form.email_institucional?.trim() || null,
         email_personal: form.email_personal?.trim() || null,
         celular: form.telefono_movil?.trim() || null,
@@ -854,14 +893,7 @@ export function StudentMaster() {
         metadata_admision,
       };
 
-      // Garantizar asignación obligatoria de programa_id
-      const assignedProg = form.programa_id
-        || (currentPrograma && currentPrograma !== 'ALL' ? currentPrograma : null)
-        || (user?.programa_id ? String(user.programa_id) : null)
-        || (user?.email === 'secretaria_prog@siga.edu' ? '2' : '1');
-      payload.programa_id = parseInt(assignedProg, 10);
-
-      const res = await fetch(`${API_BASE}/api/mod-gestion-academica/estudiantes/`, {
+      const res = await fetch(`${API_BASE}/api/mod-gestion-academica/estudiantes/?catalogo_implementado=true`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -985,11 +1017,7 @@ export function StudentMaster() {
   };
 
   // Registra en estudiantes los admitidos pendientes de Admision. Lanza Error si falla.
-  const registrarPendientesAdmision = async (publicacion) => {
-    if (publicacion && !publicacion.ids_pendientes.length) {
-      toast.info(`Los ${publicacion.total} ingresantes del Excel ya están registrados. La bandeja quedó vacía.`);
-      return;
-    }
+  const registrarPendientesAdmision = async () => {
     setSyncStep('Leyendo ingresantes…');
     const resAdmitidos = await fetch(`${API_BASE}/api/mod-admision/admitidos?solo_pendientes=true`, {
       headers: authHeaders(), cache: 'no-store',
@@ -997,16 +1025,12 @@ export function StudentMaster() {
     if (!resAdmitidos.ok || respuestaDegradada(resAdmitidos)) {
       throw new Error(await leerError(resAdmitidos, 'No se pudo leer la lista de Admisión'));
     }
-    const { admitidos: bandeja } = await resAdmitidos.json();
-    if (!Array.isArray(bandeja) || bandeja.some(fila => !Number.isInteger(fila?.admision_id))) {
+    const { admitidos } = await resAdmitidos.json();
+    if (!Array.isArray(admitidos) || admitidos.some(fila => !Number.isInteger(fila?.admision_id))) {
       throw new Error('Admisión devolvió una lista de ingresantes inválida.');
     }
-    const idsPublicados = publicacion && new Set(publicacion.ids_pendientes);
-    const admitidos = idsPublicados ? bandeja.filter(fila => idsPublicados.has(fila.admision_id)) : bandeja;
     if (admitidos.length === 0) {
-      toast.info(publicacion
-        ? 'Esta carga ya se procesó o fue reemplazada por otro archivo.'
-        : 'La bandeja de Admisión está vacía.');
+      toast.info('La bandeja de Admisión está vacía.');
       return;
     }
 
@@ -1052,10 +1076,10 @@ export function StudentMaster() {
     }
   };
 
-  const ejecutarSincronizacion = async (action, tarea) => {
+  const ejecutarSincronizacion = async (tarea) => {
     if (syncInProgress.current) return;
     syncInProgress.current = true;
-    setSyncAction(action);
+    setSyncing(true);
     try {
       await tarea();
     } catch (e) {
@@ -1064,7 +1088,7 @@ export function StudentMaster() {
     } finally {
       await cargarResumenAdmision();
       syncInProgress.current = false;
-      setSyncAction('');
+      setSyncing(false);
       setSyncStep('');
     }
   };
@@ -1075,7 +1099,7 @@ export function StudentMaster() {
       toast.error('Solo el administrador puede sincronizar ingresantes de Admisión.');
       return;
     }
-    await ejecutarSincronizacion('admision', async () => {
+    await ejecutarSincronizacion(async () => {
       setSyncStep('Consultando Admisión…');
       const resumen = await cargarResumenAdmision();
       if (!resumen) {
@@ -1093,60 +1117,6 @@ export function StudentMaster() {
         return;
       }
       toast.info('La bandeja de Admisión está vacía.');
-    });
-  };
-
-  // Abre el selector en el mismo clic (sin await previo): los navegadores
-  // bloquean input.click() si se pierde la "activacion de usuario".
-  const abrirSelectorExcelAdmision = () => {
-    if (!esAdminAdmision || syncInProgress.current) return;
-    const input = admisionFileRef.current;
-    if (!input) {
-      toast.error('No se pudo abrir el selector de archivos. Recargue la página e inténtelo de nuevo.');
-      return;
-    }
-    input.value = '';
-    input.click();
-  };
-
-  // Publica un Excel nuevo en Admision y registra a los pendientes.
-  const procesarExcelAdmision = async (file) => {
-    if (!file || !esAdminAdmision || syncInProgress.current) return;
-    if (!/\.xlsx$/i.test(file.name)) {
-      toast.error('El archivo debe ser un Excel .xlsx (plantilla ADMISION_2026.xlsx).');
-      return;
-    }
-    await ejecutarSincronizacion('excel', async () => {
-      const ok = await toast.confirm({
-        title: 'Cargar Excel de Admisión',
-        message: `"${file.name}" reemplazará la lista temporal de Admisión. Los ingresantes que falten en el padrón se registrarán y sus filas se retirarán de la bandeja.`,
-        type: 'info',
-        confirmText: 'Sí, cargar y registrar'
-      });
-      if (!ok) return;
-      setSyncStep('Cargando Excel…');
-      const formData = new FormData();
-      formData.append('file', file);
-      const resUpload = await fetch(`${API_BASE}/api/mod-admision/upload`, {
-        method: 'POST', headers: authHeaders(), body: formData
-      });
-      if (!resUpload.ok || respuestaDegradada(resUpload)) {
-        throw new Error(await leerError(resUpload, 'Admisión no pudo procesar el Excel'));
-      }
-      const publicacion = await resUpload.json();
-      if (!Number.isInteger(publicacion?.total) || publicacion.total <= 0
-        || !Array.isArray(publicacion.ids_pendientes) || publicacion.ids_pendientes.some(id => !Number.isInteger(id))) {
-        throw new Error('Admisión devolvió un resultado de publicación inválido.');
-      }
-      if (publicacion.avisos?.length) {
-        const ejemplos = publicacion.avisos.slice(0, 2).join(' ');
-        toast.warning(`Revisa los avisos del Excel: ${ejemplos}${publicacion.avisos.length > 2 ? ' Hay más avisos.' : ''}`, 12000);
-      }
-      try {
-        await registrarPendientesAdmision(publicacion);
-      } catch (e) {
-        throw new Error(`El Excel se publicó en Admisión. ${e.message} Puedes reintentar con “Sincronizar desde Admisión”.`);
-      }
     });
   };
 
@@ -1223,11 +1193,12 @@ export function StudentMaster() {
                   icon={GraduationCap}
                   required
                   showMissing={showMissing}
-                  options={PROGRAMAS_OPTIONS}
+                  options={programasDisponibles.map(p => ({ value: p.id, label: p.label }))}
                   value={form.programa_id}
                   onChange={(programaId) => setForm({ ...form, programa_id: programaId })}
                   placeholder="Buscar carrera..."
                 />
+                {avisoCatalogo && <p className="mt-1 text-xs text-slate-600" role="status">{avisoCatalogo}</p>}
               </div>
               <div className="sm:col-span-2">
                 <InputGroup label="Nombres" required showMissing={showMissing} value={form.nombres} onChange={e=>setForm({...form, nombres: e.target.value})} placeholder="Nombres completos" />
@@ -1512,37 +1483,17 @@ export function StudentMaster() {
           <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
             {['superadmin', 'admin'].includes(userRole) && (
               <>
-                <input
-                  ref={admisionFileRef}
-                  type="file"
-                  accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                  className="hidden"
-                  data-testid="admision-excel-input"
-                  onChange={(e) => procesarExcelAdmision(e.target.files?.[0])}
-                />
-                <button
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/10 border border-white/25 text-white font-semibold text-sm backdrop-blur-sm hover:bg-white/20 active:scale-[0.98] transition-all duration-200 min-h-[44px] w-full sm:w-auto disabled:opacity-60 disabled:cursor-not-allowed disabled:active:scale-100"
-                  onClick={abrirSelectorExcelAdmision}
-                  disabled={syncing}
-                  aria-busy={syncAction === 'excel'}
-                  title="Publica un nuevo Excel de resultados de Admisión (ADMISION_2026.xlsx) y registra a los ingresantes"
-                >
-                  {syncAction === 'excel'
-                    ? <Loader2 size={18} className="shrink-0 animate-spin" />
-                    : <FileSpreadsheet size={18} className="shrink-0" />}
-                  <span className="whitespace-nowrap">{syncAction === 'excel' ? (syncStep || 'Cargar Excel') : 'Cargar Excel'}</span>
-                </button>
                 <button
                   className="relative inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-white/15 border border-white/30 text-white font-semibold text-sm backdrop-blur-sm hover:bg-white/25 active:scale-[0.98] transition-all duration-200 min-h-[44px] w-full sm:w-auto disabled:opacity-70 disabled:cursor-wait disabled:active:scale-100"
                   onClick={handleSincronizar}
                   disabled={syncing}
-                  aria-busy={syncAction === 'admision'}
+                  aria-busy={syncing}
                   title="Registra como estudiantes a los ingresantes publicados por Admisión"
                 >
-                  {syncAction === 'admision'
+                  {syncing
                     ? <Loader2 size={18} className="shrink-0 animate-spin" />
                     : <CloudDownload size={18} className="shrink-0" />}
-                  <span className="whitespace-nowrap">{syncAction === 'admision' ? (syncStep || 'Sincronizando…') : 'Sincronizar desde Admisión'}</span>
+                  <span className="whitespace-nowrap">{syncing ? (syncStep || 'Sincronizando…') : 'Sincronizar desde Admisión'}</span>
                   {!syncing && admisionResumen?.pendientes > 0 && (
                     <span
                       className="absolute -top-2 -right-2 min-w-[22px] h-[22px] px-1.5 rounded-full bg-amber-400 text-amber-950 text-[11px] font-bold flex items-center justify-center shadow ring-2 ring-white/70"
@@ -1574,7 +1525,12 @@ export function StudentMaster() {
 
       <div className="glass-card p-3 mb-6 flex flex-col md:flex-row md:items-center gap-3 relative z-30 lg:shrink-0">
         {['superadmin', 'admin', 'secretaria_academica', 'admin_admision'].includes(userRole) && (
-          <ProgramaFilter value={currentPrograma} onChange={setCurrentPrograma} />
+          <ProgramaFilter
+            value={currentPrograma}
+            onChange={setCurrentPrograma}
+            programas={programasDisponibles}
+            aviso={avisoCatalogo}
+          />
         )}
         <div className="group flex-1 flex items-center gap-3 h-[56px] pl-3 pr-3 rounded-xl border-2 border-slate-200 bg-white shadow-md transition-all duration-200 focus-within:border-primary/60 focus-within:ring-4 focus-within:ring-primary/15 focus-within:shadow-lg focus-within:shadow-primary/10">
           <span className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-primary-dark text-white flex items-center justify-center flex-shrink-0 shadow-md shadow-primary/40 transition-transform duration-200 group-focus-within:scale-105">
@@ -1633,8 +1589,8 @@ export function StudentMaster() {
             disabled={syncing}
             className="shrink-0 inline-flex items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-2 font-semibold text-white hover:bg-amber-600 disabled:opacity-60 disabled:cursor-wait"
           >
-            {syncAction === 'admision' ? <Loader2 size={16} className="animate-spin" /> : <UserPlus size={16} />}
-            {syncAction === 'admision' ? (syncStep || 'Registrando…') : 'Registrar ahora'}
+            {syncing ? <Loader2 size={16} className="animate-spin" /> : <UserPlus size={16} />}
+            {syncing ? (syncStep || 'Registrando…') : 'Registrar ahora'}
           </button>
         </div>
       )}
@@ -1744,6 +1700,7 @@ export function StudentMaster() {
               ) : (
                 paginatedStudents.map(s => {
                   const initials = `${(s.nombres || '')[0] || ''}${(s.apellidos || '')[0] || ''}`.toUpperCase();
+                  const carrera = programaDelEstudiante(s, programas) || 'Sin carrera';
                   const isPostulante = s.estado_academico === 'postulante';
                   const isMatriculado = s.estado_academico === 'matriculado' || s.estado_academico === 'ingresante';
 
@@ -1787,11 +1744,11 @@ export function StudentMaster() {
                       <td className="py-3.5 px-4">
                         <span
                           className="inline-flex items-center gap-1.5 max-w-[240px] truncate rounded-lg border border-primary/20 bg-primary/5 px-2.5 py-1 text-xs font-extrabold text-primary-dark shadow-xs"
-                          title={s.programa_id ? getProgramaLabel(s.programa_id) : 'Sin carrera'}
+                          title={carrera}
                         >
                           <GraduationCap size={13} className="shrink-0 text-primary" />
                           <span className="truncate">
-                            {s.programa_id ? getProgramaLabel(s.programa_id) : 'Sin carrera'}
+                            {carrera}
                           </span>
                         </span>
                       </td>
@@ -2069,6 +2026,7 @@ export function StudentMaster() {
       {editingStudent && (
         <EditStudentModal
           student={editingStudent}
+          programaNombre={programaDelEstudiante(editingStudent, programas)}
           onClose={() => setEditingStudent(null)}
           onUpdated={() => {
             setEditingStudent(null);
@@ -2080,6 +2038,7 @@ export function StudentMaster() {
       {selectedStudent && (
         <StudentDetail
           student={selectedStudent}
+          programaNombre={programaDelEstudiante(selectedStudent, programas)}
           onClose={() => setSelectedStudent(null)}
           onChanged={() => handleSearch(searchTerm)}
         />

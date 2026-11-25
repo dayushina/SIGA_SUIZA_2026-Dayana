@@ -31,9 +31,11 @@ export function StaffManagement() {
       setStaffList(Array.isArray(data) ? data : []);
       
       // Also fetch programs for the dropdown
-      const progData = await apiClient.request('/api/mod-programas-estudio/programas');
+      const [progData, implemented] = await Promise.all([
+        apiClient.request('/api/mod-programas-estudio/programas'),
+        apiClient.request('/api/mod-programas-estudio/programas?implementados=true'),
+      ]);
       setPrograms(Array.isArray(progData) ? progData : []);
-      const implemented = await apiClient.request('/api/mod-programas-estudio/programas?implementados=true');
       setImplementedPrograms(Array.isArray(implemented) ? implemented : []);
     } catch (error) {
       console.error('Error fetching staff:', error);
@@ -121,7 +123,6 @@ export function StaffManagement() {
   };
 
   const isContracted = ['CONTRATADO_DRE', 'CONTRATADO_INSTITUCIONAL'].includes(formData.condicion_laboral);
-  const requiresProgram = ['SECRETARIA_PROGRAMA', 'DOCENTE_AULA', 'ASISTENTE_LABORATORIO', 'JEFE_AREA'].includes(formData.cargo_funcional);
 
   return (
     <div className="space-y-6">
@@ -317,24 +318,24 @@ export function StaffManagement() {
                       </select>
                     </div>
 
-                    {requiresProgram && (
-                      <div className="animate-fade-in">
-                        <label className="block text-sm font-semibold text-slate-700 mb-1">Designar a Programa</label>
-                        <select 
-                          name="programa_estudio_id"
-                          value={formData.programa_estudio_id}
-                          onChange={handleInputChange}
-                          required={requiresProgram}
-                          className="input-field w-full px-4 py-2 font-semibold"
-                        >
-                          <option value="">-- Seleccionar Carrera --</option>
-                          {(formData.cargo_funcional === 'SECRETARIA_PROGRAMA' ? implementedPrograms : programs).map(p => (
-                            <option key={p.id} value={p.id}>{p.nombre}</option>
-                          ))}
-                        </select>
-                        <p className="text-[10px] text-primary mt-1 font-medium">Requerido para aislar la data administrativa</p>
-                      </div>
-                    )}
+                    <div>
+                      <label className="block text-sm font-semibold text-slate-700 mb-1" htmlFor="personal-programa">
+                        Programa de estudios implementado
+                      </label>
+                      <select
+                        id="personal-programa"
+                        name="programa_estudio_id"
+                        value={formData.programa_estudio_id}
+                        onChange={handleInputChange}
+                        required
+                        className="input-field w-full px-4 py-2 font-semibold"
+                      >
+                        <option value="">Selecciona un programa</option>
+                        {implementedPrograms.map(p => (
+                          <option key={p.id} value={p.id}>{p.nombre}</option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
                 </div>
 

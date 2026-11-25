@@ -251,7 +251,7 @@ const EditField = ({
   );
 };
 
-export function EditStudentModal({ student, onClose, onUpdated }) {
+export function EditStudentModal({ student, programaNombre, onClose, onUpdated }) {
   const [form, setForm] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -392,7 +392,7 @@ export function EditStudentModal({ student, onClose, onUpdated }) {
     }
   };
 
-  const carreraNombre = PROGRAMAS[student.programa_id] || (student.programa_id ? `Programa ${student.programa_id}` : 'Sin carrera');
+  const carreraNombre = programaNombre || PROGRAMAS[student.programa_id] || (student.programa_id ? `Programa ${student.programa_id}` : 'Sin carrera');
 
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in">

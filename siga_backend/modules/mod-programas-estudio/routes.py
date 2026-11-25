@@ -1,6 +1,6 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Request
+from fastapi import APIRouter, HTTPException, Depends, status, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete, text
+from sqlalchemy import select, func, delete, text, table, column
 from typing import List, Optional
 from datetime import datetime, date
 from pydantic import BaseModel, ConfigDict, model_validator
@@ -9,6 +9,7 @@ from models import ProgramaEstudio, ProgramaConfiguracion, ProgramaModulo, Progr
 from shared.identity import (
     Identity, get_identity, es_superadmin, es_coordinador_de, es_coordinador_de_docente
 )
+from shared.programas import programa_implementado
 from schemas import (
     SilaboUpdate, PlanTrabajoDocenteUpdate, CargaLectivaUpdate, HorarioPeriodoUpdate
 )
@@ -499,6 +500,7 @@ class CargaLectivaResponse(CargaLectivaBase):
     acta_cerrada_at: Optional[datetime] = None
     acta_cerrada_por: Optional[int] = None
     unidad_nombre: Optional[str] = None
+    docente_nombre: Optional[str] = None
     programa_nombre: Optional[str] = None
     modulo_nombre: Optional[str] = None
     ciclo: Optional[int] = None
@@ -524,6 +526,70 @@ class HorarioPeriodoResponse(HorarioPeriodoBase):
 
 # --- Endpoints Coordinación ---
 from models import CargaLectiva, HorarioPeriodo
+
+class DocenteDisponible(BaseModel):
+    id: int
+    full_name: str
+
+
+async def _docentes_del_periodo(db, programa_id, periodo_id, ids=None):
+    consulta = """
+        SELECT u.id, COALESCE(NULLIF(trim(u.full_name), ''), 'Docente #' || u.id) AS full_name
+        FROM perfiles_personal p JOIN core_users u ON u.id = p.user_id
+        WHERE p.programa_estudio_id = :programa AND u.is_active
+          AND EXISTS (
+              SELECT 1 FROM core_user_roles ur JOIN core_roles r ON r.id = ur.role_id
+              WHERE ur.user_id = u.id AND r.name = 'docente'
+          )
+          AND (
+              EXISTS (SELECT 1 FROM docentes_periodo d
+                      WHERE d.programa_id = :programa AND d.periodo_id = :periodo AND d.docente_id = u.id)
+              OR EXISTS (SELECT 1 FROM carga_lectiva c
+                         WHERE c.programa_id = :programa AND c.periodo_id = :periodo AND c.docente_id = u.id)
+          )
+    """
+    params = {"programa": programa_id, "periodo": periodo_id}
+    if ids is not None:
+        consulta += " AND u.id = ANY(:ids)"
+        params["ids"] = ids
+    consulta += " ORDER BY lower(u.full_name), u.id"
+    return (await db.execute(text(consulta), params)).mappings().all()
+
+
+async def _validar_docentes_del_periodo(db, programa_id, periodo_id, ids):
+    # La edición de cuentas toma un bloqueo exclusivo sobre estas mismas filas.
+    # Consultar la elegibilidad después del bloqueo permite leer los cambios ya confirmados.
+    ids_ordenados = sorted(ids)
+    await db.execute(text("""
+        SELECT id FROM core_users WHERE id = ANY(:ids) ORDER BY id FOR SHARE
+    """), {"ids": ids_ordenados})
+    disponibles = await _docentes_del_periodo(db, programa_id, periodo_id, ids_ordenados)
+    if ids != {d["id"] for d in disponibles}:
+        raise HTTPException(422, detail="Todos los docentes deben estar activos y habilitados para el programa y periodo lectivo.")
+
+
+async def _periodo_para_carga(db, periodo_id):
+    periodo = await db.scalar(
+        select(PeriodoAcademico).where(PeriodoAcademico.id == periodo_id).with_for_update(read=True)
+    )
+    if periodo is None or (periodo.estado or "").lower() in {"cerrado", "finalizado"}:
+        raise HTTPException(409, detail="La carga lectiva requiere un periodo existente que permita modificaciones.")
+
+
+@router.get("/programas/{programa_id}/docentes-disponibles", response_model=list[DocenteDisponible])
+async def listar_docentes_disponibles(
+    programa_id: int, periodo_id: int, request: Request, response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    ident = await get_identity(request, db)
+    if not es_coordinador_de(ident, programa_id):
+        raise HTTPException(403, detail="No tiene permisos para consultar los docentes de este programa.")
+    await programa_implementado(db, programa_id)
+    if await db.get(PeriodoAcademico, periodo_id) is None:
+        raise HTTPException(404, detail="Periodo lectivo no encontrado.")
+    response.headers["Cache-Control"] = "no-store"
+    return await _docentes_del_periodo(db, programa_id, periodo_id)
+
 
 async def _validar_acceso_docente(ident: Identity, docente_id: int, db: AsyncSession):
     """
@@ -551,41 +617,9 @@ async def crear_carga_lectiva(programa_id: int, carga: CargaLectivaCreate, reque
             detail="No tiene permisos para gestionar la carga lectiva de este programa"
         )
 
-    # 1. Validar que el docente exista, esté activo y tenga rol docente o coordinador_programa
-    doc_res = await db.execute(
-        text("""
-            SELECT u.is_active, r.name 
-            FROM core_users u
-            JOIN core_user_roles ur ON u.id = ur.user_id
-            JOIN core_roles r ON ur.role_id = r.id
-            WHERE u.id = :did
-        """),
-        {"did": carga.docente_id}
-    )
-    doc_rows = doc_res.fetchall()
-    if not doc_rows or not any(row[0] for row in doc_rows):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="El docente indicado no existe o no se encuentra activo en el sistema"
-        )
-    roles_doc = {row[1].lower().strip() for row in doc_rows if row[1]}
-    if not (roles_doc.intersection({"docente", "coordinador_programa"})):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="El usuario asignado debe poseer rol docente o coordinador_programa"
-        )
-
-    # 2. Validar que el periodo académico no esté cerrado
-    per_res = await db.execute(
-        text("SELECT estado FROM periodos_academicos WHERE id = :pid"),
-        {"pid": carga.periodo_id}
-    )
-    per_row = per_res.fetchone()
-    if not per_row or per_row[0] in ("cerrado", "finalizado"):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="No se puede asignar carga lectiva en un periodo académico cerrado o finalizado"
-        )
+    await programa_implementado(db, programa_id)
+    await _periodo_para_carga(db, carga.periodo_id)
+    await _validar_docentes_del_periodo(db, programa_id, carga.periodo_id, {carga.docente_id})
 
     # 3. Validar duplicidad
     duplicada = await db.execute(
@@ -609,11 +643,16 @@ async def crear_carga_lectiva(programa_id: int, carga: CargaLectivaCreate, reque
 
 @router.get("/programas/{programa_id}/carga-lectiva", response_model=List[CargaLectivaResponse])
 async def listar_carga_lectiva(programa_id: int, periodo_id: int, db: AsyncSession = Depends(get_db)):
+    usuarios = table("core_users", column("id"), column("full_name"))
     result = await db.execute(
-        select(CargaLectiva)
+        select(CargaLectiva, usuarios.c.full_name)
+        .outerjoin(usuarios, usuarios.c.id == CargaLectiva.docente_id)
         .where(CargaLectiva.programa_id == programa_id, CargaLectiva.periodo_id == periodo_id)
     )
-    return result.scalars().all()
+    return [
+        CargaLectivaResponse.model_validate(carga).model_copy(update={"docente_nombre": nombre})
+        for carga, nombre in result.all()
+    ]
 
 class ClonarCargaRequest(BaseModel):
     from_periodo_id: int
@@ -628,17 +667,7 @@ async def clonar_carga_lectiva(programa_id: int, req: ClonarCargaRequest, reques
             detail="No tiene permisos para clonar la carga lectiva de este programa"
         )
 
-    # Validar periodo destino no cerrado
-    per_res = await db.execute(
-        text("SELECT estado FROM periodos_academicos WHERE id = :pid"),
-        {"pid": req.to_periodo_id}
-    )
-    per_row = per_res.fetchone()
-    if not per_row or per_row[0] in ("cerrado", "finalizado"):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="No se puede clonar carga lectiva hacia un periodo académico cerrado o finalizado"
-        )
+    await _periodo_para_carga(db, req.to_periodo_id)
 
     result = await db.execute(
         select(CargaLectiva)
@@ -674,9 +703,11 @@ async def clonar_carga_lectiva(programa_id: int, req: ClonarCargaRequest, reques
                 acta_cerrada_por=None,
                 fecha_limite_notas=None
             )
-            db.add(nueva_carga)
             nuevas_cargas.append(nueva_carga)
-            
+
+    if nuevas_cargas:
+        await _validar_docentes_del_periodo(db, programa_id, req.to_periodo_id, {c.docente_id for c in nuevas_cargas})
+        db.add_all(nuevas_cargas)
     await db.commit()
     return {"message": f"Se clonaron {len(nuevas_cargas)} registros de carga lectiva."}
 
@@ -866,32 +897,11 @@ async def actualizar_carga_lectiva(
 
     update_data = carga_in.model_dump(exclude_unset=True)
 
-    # 6. Validar nuevo docente si fue provisto
-    if "docente_id" in update_data and update_data["docente_id"] is not None:
-        nuevo_doc_id = update_data["docente_id"]
-        if nuevo_doc_id != db_carga.docente_id:
-            doc_res = await db.execute(
-                text("""
-                    SELECT u.is_active, r.name 
-                    FROM core_users u
-                    JOIN core_user_roles ur ON u.id = ur.user_id
-                    JOIN core_roles r ON ur.role_id = r.id
-                    WHERE u.id = :did
-                """),
-                {"did": nuevo_doc_id}
-            )
-            doc_rows = doc_res.fetchall()
-            if not doc_rows or not any(row[0] for row in doc_rows):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail="El docente indicado no existe o no se encuentra activo en el sistema"
-                )
-            roles_doc = {row[1].lower().strip() for row in doc_rows if row[1]}
-            if not (roles_doc.intersection({"docente", "coordinador_programa"})):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail="El usuario asignado debe poseer rol docente o coordinador_programa"
-                )
+    if "docente_id" in update_data and update_data["docente_id"] != db_carga.docente_id:
+        nuevo_docente = update_data["docente_id"]
+        if nuevo_docente is None:
+            raise HTTPException(422, detail="Indique el docente responsable de la carga lectiva.")
+        await _validar_docentes_del_periodo(db, programa_id, db_carga.periodo_id, {nuevo_docente})
 
     # 7. Validar duplicidad de sección si fue modificada
     if "seccion" in update_data and update_data["seccion"] is not None:

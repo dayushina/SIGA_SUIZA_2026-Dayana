@@ -1,13 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import React from 'react';
 import { CoordinatorAcademic } from '../modules/academic/CoordinatorAcademic';
 import { apiClient } from '../core/api/client';
+import { UserManagement } from '../modules/admin/UserManagement';
+import { ToastProvider } from '../core/ui/ToastContext';
 
 // Mock del contexto de autenticación
+let usuario;
 vi.mock('../core/auth/useAuth', () => ({
   useAuth: () => ({
-    user: { id: 2, email: 'coordinador.dsi@siga.edu', role: 'coordinador_programa' },
+    user: usuario,
     openPasswordModal: vi.fn()
   })
 }));
@@ -22,23 +25,16 @@ vi.mock('../core/api/client', () => ({
 describe('Auditoría Frontend - Coordinación de Programa (Control de Actas)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    usuario = { id: 2, role: 'coordinador_programa', programa_id: 1 };
   });
 
   const mockInitialData = () => {
     apiClient.request.mockImplementation((endpoint, _options) => {
-      if (endpoint === '/api/mod-programas-estudio/programas') {
+      if (endpoint === '/api/mod-programas-estudio/programas?implementados=true') {
         return Promise.resolve([{ id: 1, nombre: 'Desarrollo de Sistemas de Información' }]);
       }
       if (endpoint === '/api/mod-programas-estudio/periodos') {
         return Promise.resolve([{ id: 1, codigo: '2026-I', estado: 'ACTIVO' }]);
-      }
-      if (endpoint === '/api/mod-usuarios/personal') {
-        return Promise.resolve([
-          { usuario: { id: 2, email: 'coordinador.dsi@siga.edu' }, perfil: { cargo_funcional: 'COORDINADOR_PROGRAMA', programa_estudio_id: 1 } }
-        ]);
-      }
-      if (endpoint === '/api/mod-usuarios/usuarios') {
-        return Promise.resolve([]);
       }
       if (endpoint.includes('/api/mod-programas-estudio/programas/1/carga-lectiva')) {
         return Promise.resolve([]);
@@ -225,5 +221,56 @@ describe('Auditoría Frontend - Coordinación de Programa (Control de Actas)', (
         })
       );
     });
+  });
+});
+
+describe('Pertenencia académica y disponibilidad docente', () => {
+  const programas = [{ id: 1, nombre: 'Contabilidad' }, { id: 2, nombre: 'Enfermería Técnica' }];
+  const periodos = [{ id: 1, codigo: '2026-I', estado: 'en_curso' }, { id: 2, codigo: '2026-II', estado: 'planificacion' }];
+
+  it('consulta la pareja seleccionada y descarta la respuesta de un periodo anterior', async () => {
+    usuario = { id: 1, is_superuser: true };
+    let resolverAnterior;
+    apiClient.request.mockImplementation(path => {
+      if (path.endsWith('/programas?implementados=true')) return Promise.resolve(programas);
+      if (path.endsWith('/periodos')) return Promise.resolve(periodos);
+      if (path.endsWith('/1/docentes-disponibles?periodo_id=1')) {
+        return new Promise(resolve => { resolverAnterior = resolve; });
+      }
+      if (path.endsWith('/1/docentes-disponibles?periodo_id=2')) return Promise.resolve([{ id: 8, full_name: 'Docente Contabilidad' }]);
+      if (path.endsWith('/2/docentes-disponibles?periodo_id=2')) return Promise.resolve([{ id: 9, full_name: 'Docente Enfermería' }]);
+      return Promise.resolve([]);
+    });
+    render(<CoordinatorAcademic />);
+    await waitFor(() => expect(resolverAnterior).toBeTypeOf('function'));
+    fireEvent.change(screen.getByLabelText('Periodo lectivo'), { target: { value: '2' } });
+    await screen.findByRole('option', { name: 'Docente Contabilidad' });
+    fireEvent.change(screen.getByLabelText('Docente'), { target: { value: '8' } });
+    fireEvent.change(screen.getByLabelText('Programa de estudios'), { target: { value: '2' } });
+    await screen.findByRole('option', { name: 'Docente Enfermería' });
+    await act(async () => resolverAnterior([{ id: 7, full_name: 'Docente del periodo anterior' }]));
+    const selector = screen.getByLabelText('Docente');
+    expect(selector).toHaveValue('');
+    expect(within(selector).getAllByRole('option').map(op => op.textContent))
+      .toEqual(['Seleccione Docente', 'Docente Enfermería']);
+    expect(apiClient.request.mock.calls.some(([path]) => path.startsWith('/api/mod-usuarios/'))).toBe(false);
+  });
+
+  it.each(['coordinador_programa', 'docente', 'estudiante'])('exige un programa para %s', async rol => {
+    apiClient.request.mockImplementation(path => {
+      if (path.endsWith('/roles')) return Promise.resolve([{ id: 1, name: rol }]);
+      if (path.endsWith('/programas?implementados=true')) return Promise.resolve(programas);
+      if (path.endsWith('/periodos')) return Promise.resolve(periodos);
+      return Promise.resolve([]);
+    });
+    render(<ToastProvider><UserManagement /></ToastProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Nuevo Usuario' }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: rol }));
+    const selector = screen.getByRole('combobox', { name: /Programa de estudios implementado/ });
+    expect(selector).toBeRequired();
+    await within(selector).findByRole('option', { name: 'Contabilidad' });
+    fireEvent.change(selector, { target: { value: '1' } });
+    if (rol === 'docente') expect(await screen.findByRole('checkbox', { name: '2026-I' })).toBeVisible();
+    else expect(screen.queryByText('Periodos lectivos habilitados para docencia')).not.toBeInTheDocument();
   });
 });

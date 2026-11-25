@@ -10,6 +10,7 @@ from schemas import EstudianteCreate, EstudianteResponse, EstudianteUpdate, Matr
 from admision_normalizer import normalizar_admitido
 from autorizacion import Actor, ROLES_DESMATRICULAR, ROLES_ELIMINAR_ESTUDIANTE, ROLES_INGESTA_ADMISION, exigir_rol, validar_motivo
 from autorizacion import filtro_programa_estudiante, programa_de_secretaria, validar_estudiante_secretaria
+from shared.programas import programa_implementado
 from domain import EstadoMatricula
 from datetime import datetime
 from typing import Annotated, List, Literal, Optional
@@ -318,7 +319,16 @@ async def ingesta_admitidos(request: Request, data: IngestaMasivaRequest, db: As
     }
 
 @router.post("/estudiantes/", response_model=EstudianteResponse, status_code=status.HTTP_201_CREATED)
-async def crear_estudiante(request: Request, data: EstudianteCreate, db: AsyncSession = Depends(get_db)):
+async def crear_estudiante(
+    request: Request, data: EstudianteCreate, catalogo_implementado: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    if catalogo_implementado:
+        if data.programa_id is None:
+            raise HTTPException(422, detail="Selecciona un programa de estudios implementado.")
+        if not await programa_de_secretaria(request, db, data.programa_id):
+            await programa_implementado(db, data.programa_id)
+
     filas_admision = await _bloquear_filas_admision(db, [data.dni], [])
     existing = await db.execute(select(Estudiante).where(
         or_(Estudiante.dni == data.dni, Estudiante.codigo_estudiante == data.codigo_estudiante)
@@ -353,14 +363,18 @@ async def crear_estudiante(request: Request, data: EstudianteCreate, db: AsyncSe
 @router.get("/estudiantes/")
 async def obtener_estudiantes(
     request: Request, response: Response, programa_id: Optional[int] = None, q: str = "",
+    catalogo_implementado: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
     asignacion = await programa_de_secretaria(request, db, programa_id)
+    seleccion = asignacion
+    if seleccion is None and catalogo_implementado and programa_id is not None:
+        seleccion = (programa_id, await programa_implementado(db, programa_id))
     response.headers["Cache-Control"] = "no-store"
     try:
         query = select(Estudiante).order_by(Estudiante.apellidos)
-        if asignacion:
-            query = query.where(filtro_programa_estudiante(*asignacion))
+        if seleccion:
+            query = query.where(filtro_programa_estudiante(*seleccion))
         elif programa_id is not None:
             query = query.where(Estudiante.programa_id == programa_id)
         if termino := " ".join(q.split()):
@@ -398,6 +412,7 @@ async def obtener_estudiantes(
                 "apellidos": r.apellidos,
                 "estado_academico": r.estado_academico,
                 "programa_id": asignacion[0] if asignacion else r.programa_id,
+                "plan_estudios_id": r.plan_estudios_id,
                 "foto_url": r.foto_url,
                 "email_personal": r.email_personal,
                 "email_institucional": r.email_institucional,

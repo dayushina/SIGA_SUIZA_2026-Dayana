@@ -12,6 +12,7 @@ import { EvaluationDashboard } from './modules/evaluation/EvaluationDashboard';
 import { CoordinatorSupervision } from './modules/evaluation/CoordinatorSupervision';
 import { StudentReportCard } from './modules/evaluation/StudentReportCard';
 import { AdminDashboard } from './modules/admin/AdminDashboard';
+import { AdmissionModule } from './modules/admin/AdmissionModule';
 import { TramitesDashboard } from './modules/academic/TramitesDashboard';
 import { FinancesDashboard } from './modules/finances/FinancesDashboard';
 import { CoordinatorAcademic } from './modules/academic/CoordinatorAcademic';
@@ -44,6 +45,7 @@ function AppContent() {
     if (userRoles.includes('secretaria_programa')) return 'enrollment';
     if (userRoles.includes('caja_tesoreria')) return 'finanzas';
     if (userRoles.includes('director')) return 'academic';
+    if (userRoles.includes('admin_admision')) return 'admission';
     return 'dashboard';
   };
 
@@ -81,6 +83,7 @@ function AppContent() {
       case 'tramites': return <TramitesDashboard />;
       case 'finanzas': return <FinancesDashboard />;
       case 'admin': return <AdminDashboard onNavigate={setCurrentView} />;
+      case 'admission': return <AdmissionModule />;
       default: return <Dashboard onNavigate={setCurrentView} />;
     }
   };

@@ -1,5 +1,5 @@
 /* eslint-disable react-hooks/set-state-in-effect */
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../core/auth/useAuth';
 import { apiClient } from '../../core/api/client';
 import { useToast } from '../../core/ui/ToastContext';
@@ -64,9 +64,11 @@ export function CoordinatorAcademic() {
   const [selectedPeriod, setSelectedPeriod] = useState('');
 
   // Data
-  const [personal, setPersonal] = useState([]);
-  const [allDocentes, setAllDocentes] = useState([]);
-  const [docentes, setDocentes] = useState([]);
+  const [ofertaDocente, setOfertaDocente] = useState(null);
+  const cargaSolicitud = useRef(0);
+  const contexto = selectedProgram + '/' + selectedPeriod;
+  const docentes = ofertaDocente?.contexto === contexto ? ofertaDocente.docentes : [];
+  const estadoDocentes = ofertaDocente?.contexto === contexto ? ofertaDocente.estado : 'cargando';
   const [unidadesFlat, setUnidadesFlat] = useState([]);
   const [cargaLectiva, setCargaLectiva] = useState([]);
   const [horarios, setHorarios] = useState([]);
@@ -78,138 +80,100 @@ export function CoordinatorAcademic() {
   const [showCloneModal, setShowCloneModal] = useState(false);
   const [cloneFromPeriod, setCloneFromPeriod] = useState('');
 
-  // 1. Initial Load
+  const userRoles = (Array.isArray(user?.roles) ? user.roles : [user?.role])
+    .map(role => typeof role === 'string' ? role : role?.name ?? role?.nombre);
+  const isCoordinador = !user?.is_superuser && !userRoles.includes('superadmin') && userRoles.includes('coordinador_programa');
+  const programaAsignado = user?.programa_id;
+
   useEffect(() => {
-    const fetchInitial = async () => {
-      try {
-        const [progRes, perRes, personalRes, usuariosRes] = await Promise.all([
-          apiClient.request('/api/mod-programas-estudio/programas').catch(() => []),
-          apiClient.request('/api/mod-programas-estudio/periodos').catch(() => []),
-          apiClient.request('/api/mod-usuarios/personal').catch(() => []),
-          apiClient.request('/api/mod-usuarios/usuarios').catch(() => [])
-        ]);
+    if (!user?.id) return;
+    let activo = true;
+    Promise.all([
+      apiClient.request('/api/mod-programas-estudio/programas?implementados=true').catch(() => []),
+      apiClient.request('/api/mod-programas-estudio/periodos').catch(() => []),
+    ]).then(([programas, periodos]) => {
+      if (!activo) return;
+      const catalogo = Array.isArray(programas) ? programas : [];
+      const disponibles = isCoordinador
+        ? catalogo.filter(p => String(p.id) === String(programaAsignado))
+        : catalogo;
+      const periodosValidos = Array.isArray(periodos) ? periodos : [];
+      setPrograms(disponibles);
+      setPeriods(periodosValidos);
+      const programaInicial = disponibles.find(p => p.id === programaAsignado) ?? disponibles[0];
+      setSelectedProgram(programaInicial ? String(programaInicial.id) : '');
+      const periodoActivo = periodosValidos.find(p => ['activo', 'matricula_abierta', 'en_curso'].includes(p.estado?.toLowerCase())) ?? periodosValidos[0];
+      setSelectedPeriod(periodoActivo ? String(periodoActivo.id) : '');
+    });
+    return () => { activo = false; };
+  }, [user?.id, isCoordinador, programaAsignado]);
 
-        setPrograms(progRes || []);
-        setPeriods(perRes || []);
-
-        // Combinar personal institucional y usuarios con rol docente
-        const staffList = Array.isArray(personalRes) ? [...personalRes] : [];
-        const existingUserIds = new Set(staffList.map(p => p?.usuario?.id).filter(Boolean));
-
-        (usuariosRes || []).forEach(u => {
-          const isDocente = u.roles?.some(r => r.name === 'docente');
-          if (isDocente && !existingUserIds.has(u.id)) {
-            staffList.push({
-              usuario: u,
-              perfil: {
-                cargo_funcional: 'DOCENTE_AULA',
-                programa_estudio_id: null,
-                condicion_laboral: 'CONTRATADO'
-              }
-            });
-            existingUserIds.add(u.id);
-          }
-        });
-
-        setPersonal(staffList);
-
-        const allDocs = staffList
-          .filter(p => p?.usuario && p?.perfil?.cargo_funcional !== 'SECRETARIA_PROGRAMA')
-          .map(p => p.usuario);
-        setAllDocentes(allDocs);
-
-        let hasProgram = false;
-        if (staffList.length > 0 && user) {
-          const myProfile = staffList.find(p => p?.usuario?.id === user.id);
-          if (myProfile?.perfil?.programa_estudio_id) {
-            setSelectedProgram(myProfile.perfil.programa_estudio_id.toString());
-            hasProgram = true;
-          }
-        }
-
-        if (!hasProgram && progRes && progRes.length > 0) {
-          setSelectedProgram(progRes[0].id.toString());
-        }
-
-        if (perRes && perRes.length > 0) {
-          const active = perRes.find(p => ['ACTIVO', 'activo', 'matricula_abierta', 'en_curso'].includes(p.estado)) || perRes[0];
-          setSelectedPeriod(active ? active.id.toString() : perRes[0].id.toString());
-        }
-
-      } catch (error) {
-        console.error("Error loading initial data", error);
-      }
-    };
-
-    if (user) fetchInitial();
-  }, [user]);
-
-  // 2. Load Malla and filter docentes when Program changes
   useEffect(() => {
-    if (!selectedProgram) {
-      setUnidadesFlat([]);
-      setDocentes([]);
-      return;
-    }
+    setUnidadesFlat([]);
+    if (!selectedProgram) return;
+    let activo = true;
+    apiClient.request(`/api/mod-programas-estudio/programas/${selectedProgram}/malla`)
+      .then(modulos => {
+        if (!activo) return;
+        setUnidadesFlat((modulos || []).flatMap(modulo => (modulo.unidades || []).map(ud => ({
+          ...ud, modulo_nombre: modulo.nombre, periodo_sugerido: modulo.periodo,
+        }))));
+      })
+      .catch(error => console.error('Error al consultar la malla', error));
+    return () => { activo = false; };
+  }, [selectedProgram]);
 
-    // Filter personal for the selected program (or unassigned/global) and exclude secretaries
-    const filteredStaff = personal.filter(p => 
-      p?.perfil && 
-      (!p.perfil.programa_estudio_id || p.perfil.programa_estudio_id === parseInt(selectedProgram) || p.perfil.programa_estudio_id == selectedProgram) &&
-      p.perfil.cargo_funcional !== 'SECRETARIA_PROGRAMA' &&
-      p?.usuario
-    );
-    // Map to the format the form expects (d.id, d.full_name)
-    const staffFormat = filteredStaff.map(p => p.usuario);
-    setDocentes(staffFormat);
-
-    const fetchMalla = async () => {
-      try {
-        const res = await apiClient.request(`/api/mod-programas-estudio/programas/${selectedProgram}/malla`);
-
-        // Flatten unidades for easy select dropdown
-        const flat = [];
-        (res || []).forEach(modulo => {
-          (modulo.unidades || []).forEach(ud => {
-            flat.push({ ...ud, modulo_nombre: modulo.nombre, periodo_sugerido: modulo.periodo });
-          });
-        });
-        setUnidadesFlat(flat);
-      } catch (error) {
-        console.error("Error fetching malla", error);
-      }
-    };
-    fetchMalla();
-  }, [selectedProgram, personal]);
+  useEffect(() => {
+    setCargaForm(prev => ({ ...prev, docente_id: '', unidades_didacticas_ids: [] }));
+    setIsModalOpen(false);
+    setOfertaDocente(null);
+    if (!selectedProgram || !selectedPeriod) return;
+    const controller = new AbortController();
+    apiClient.request(`/api/mod-programas-estudio/programas/${selectedProgram}/docentes-disponibles?periodo_id=${selectedPeriod}`, {
+      signal: controller.signal, cache: 'no-store',
+    }).then(data => {
+      if (controller.signal.aborted) return;
+      if (!Array.isArray(data)) throw new Error('Respuesta de docentes no válida');
+      setOfertaDocente({ contexto, docentes: data, estado: 'listo' });
+    }).catch(() => {
+      if (!controller.signal.aborted) setOfertaDocente({ contexto, docentes: [], estado: 'error' });
+    });
+    return () => controller.abort();
+  }, [selectedProgram, selectedPeriod, contexto]);
 
   const fetchCargaYHorarios = useCallback(async () => {
+    const solicitud = ++cargaSolicitud.current;
     setLoading(true);
     try {
       const [cargaRes, horRes] = await Promise.all([
         apiClient.request(`/api/mod-programas-estudio/programas/${selectedProgram}/carga-lectiva?periodo_id=${selectedPeriod}`).catch(() => []),
         apiClient.request(`/api/mod-programas-estudio/programas/${selectedProgram}/horarios?periodo_id=${selectedPeriod}`).catch(() => [])
       ]);
+      if (solicitud !== cargaSolicitud.current) return;
       setCargaLectiva(cargaRes || []);
       setHorarios(horRes || []);
     } catch (error) {
       console.error("Error fetching data", error);
     } finally {
-      setLoading(false);
+      if (solicitud === cargaSolicitud.current) setLoading(false);
     }
   }, [selectedProgram, selectedPeriod]);
 
   // 3. Load Carga & Horarios when Program AND Period change
   useEffect(() => {
+    setCargaLectiva([]);
+    setHorarios([]);
     if (!selectedProgram || !selectedPeriod) {
-      setCargaLectiva([]);
-      setHorarios([]);
+      setLoading(false);
       return;
     }
     fetchCargaYHorarios();
+    return () => { cargaSolicitud.current += 1; };
   }, [selectedProgram, selectedPeriod, fetchCargaYHorarios]);
 
   const handleCreateCarga = async (e) => {
     e.preventDefault();
+    if (!docentes.some(d => String(d.id) === cargaForm.docente_id)) return;
 
     setSaving(true);
     try {
@@ -235,7 +199,7 @@ export function CoordinatorAcademic() {
       toast.success("Docente asignado correctamente a los cursos seleccionados.");
     } catch (error) {
       console.error("Error saving carga", error);
-      toast.error("Error al guardar la carga lectiva (verifique que el curso no esté ya asignado en esa sección).");
+      toast.error(error.message || "Error al guardar la carga lectiva.");
     } finally {
       setSaving(false);
     }
@@ -302,8 +266,9 @@ export function CoordinatorAcademic() {
   };
 
   const getDocenteName = (id) => {
-    const doc = (allDocentes.length > 0 ? allDocentes : docentes).find(d => d.id === id) || docentes.find(d => d.id === id);
-    return doc ? doc.full_name || doc.email : `Docente #${id}`;
+    return docentes.find(d => d.id === id)?.full_name
+      || cargaLectiva.find(c => c.docente_id === id)?.docente_nombre
+      || `Docente #${id}`;
   };
 
   const getUDName = (id) => {
@@ -347,15 +312,23 @@ export function CoordinatorAcademic() {
       toast.success(res.message || "Carga lectiva clonada correctamente");
       setShowCloneModal(false);
       fetchCargaYHorarios();
-    } catch {
-      toast.error("Error al clonar la carga lectiva. Verifique que el periodo origen tenga registros.");
+    } catch (error) {
+      toast.error(error.message || "Error al clonar la carga lectiva.");
     } finally {
       setLoading(false);
     }
   };
 
-  const userRoles = Array.isArray(user?.roles) ? user.roles : (user?.role ? [user.role] : []);
-  const isCoordinador = !user?.is_superuser && userRoles.includes('coordinador_programa');
+  const periodoCerrado = ['cerrado', 'finalizado'].includes(periods.find(p => String(p.id) === selectedPeriod)?.estado?.toLowerCase());
+  const avisoDocentes = periodoCerrado ? 'El periodo está cerrado para nuevas asignaciones.'
+    : estadoDocentes === 'error' ? 'No se pudo consultar la disponibilidad docente.'
+    : estadoDocentes === 'cargando' ? 'Consultando docentes…'
+    : docentes.length === 0 ? 'No hay docentes habilitados para este programa y periodo.' : '';
+  const docentesHistoricos = [
+    ...docentes,
+    ...cargaLectiva.filter(c => c.docente_nombre && !docentes.some(d => d.id === c.docente_id))
+      .map(c => ({ id: c.docente_id, full_name: c.docente_nombre })),
+  ];
 
   return (
     <div className="space-y-6 animate-fade-in pb-12">
@@ -406,10 +379,12 @@ export function CoordinatorAcademic() {
             <p className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">Programa de Estudios</p>
             {isCoordinador ? (
               <div className="w-full bg-transparent font-bold text-slate-800 border-none p-0 text-sm mt-1">
-                {programs.find(p => p.id.toString() === selectedProgram)?.nombre || "Cargando..."}
+                {programs.find(p => p.id.toString() === selectedProgram)?.nombre || "Programa implementado pendiente de asignar"}
               </div>
             ) : (
               <select 
+                aria-label="Programa de estudios"
+                disabled={saving}
                 className="w-full bg-transparent font-bold text-slate-800 border-none p-0 focus:ring-0 cursor-pointer text-sm"
                 value={selectedProgram}
                 onChange={(e) => setSelectedProgram(e.target.value)}
@@ -428,23 +403,17 @@ export function CoordinatorAcademic() {
             <Calendar size={20} />
           </div>
           <div className="w-full">
-            <p className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">Periodo Activo</p>
-            {isCoordinador ? (
-              <div className="w-full bg-transparent font-bold text-slate-800 border-none p-0 text-sm mt-1">
-                {periods.find(p => p.id.toString() === selectedPeriod)?.codigo || "Cargando..."}
-              </div>
-            ) : (
-              <select 
-                className="w-full bg-transparent font-bold text-slate-800 border-none p-0 focus:ring-0 cursor-pointer text-sm"
-                value={selectedPeriod}
-                onChange={(e) => setSelectedPeriod(e.target.value)}
-              >
-                <option value="" disabled>Seleccione un periodo...</option>
-                {periods.map(p => (
-                  <option key={p.id} value={p.id.toString()}>{p.codigo}</option>
-                ))}
-              </select>
-            )}
+            <p className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">Periodo lectivo</p>
+            <select
+              aria-label="Periodo lectivo"
+              disabled={saving}
+              className="w-full bg-transparent font-bold text-slate-800 border-none p-0 focus:ring-0 cursor-pointer text-sm"
+              value={selectedPeriod}
+              onChange={e => setSelectedPeriod(e.target.value)}
+            >
+              <option value="" disabled>Seleccione un periodo...</option>
+              {periods.map(p => <option key={p.id} value={String(p.id)}>{p.codigo}</option>)}
+            </select>
           </div>
         </div>
       </div>
@@ -532,9 +501,11 @@ export function CoordinatorAcademic() {
 
                       <div className="space-y-4">
                         <div>
-                          <label className="label">Docente</label>
+                          <label className="label" htmlFor="coordinacion-docente">Docente</label>
                           <select 
+                            id="coordinacion-docente"
                             required
+                            disabled={periodoCerrado || estadoDocentes !== 'listo' || docentes.length === 0}
                             className="input-field w-full"
                             value={cargaForm.docente_id}
                             onChange={e => setCargaForm({...cargaForm, docente_id: e.target.value})}
@@ -544,6 +515,7 @@ export function CoordinatorAcademic() {
                               <option key={d.id} value={d.id}>{d.full_name || d.email}</option>
                             ))}
                           </select>
+                          {avisoDocentes && <p className="mt-2 text-xs text-slate-600" role="status">{avisoDocentes}</p>}
                         </div>
 
                         {cargaForm.docente_id && (
@@ -607,7 +579,7 @@ export function CoordinatorAcademic() {
                                     {getUDName(carga.unidad_didactica_id)}
                                   </td>
                                   <td className="px-4 py-3 text-sm text-slate-600">
-                                    {getDocenteName(carga.docente_id)}
+                                    {carga.docente_nombre || getDocenteName(carga.docente_id)}
                                   </td>
                                   <td className="px-4 py-3 text-sm text-slate-500">
                                     <span className="badge-blue mr-2">
@@ -759,7 +731,7 @@ export function CoordinatorAcademic() {
             <CoordinatorReview 
               programId={selectedProgram}
               periodId={selectedPeriod}
-              docentes={docentes}
+              docentes={docentesHistoricos}
               cargaLectiva={cargaLectiva}
               unidadesFlat={unidadesFlat}
             />

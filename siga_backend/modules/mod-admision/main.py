@@ -1,13 +1,8 @@
 from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-import json
-import os
 import uvicorn
 from contextlib import asynccontextmanager
-from io import BytesIO
-import pandas as pd
-from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -17,7 +12,13 @@ from database import engine, Base, get_db
 from models import PostulanteAdmitido
 
 import sys
-sys.path.append("/app")
+from pathlib import Path
+
+backend_dir = str(Path(__file__).resolve().parents[2])
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
+from shared.identity import es_superadmin, get_identity
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -44,84 +45,13 @@ app.add_middleware(
 async def health_check():
     return {"status": "ok", "module": "mod-admision"}
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="es">
-    <head>
-        <meta charset="UTF-8">
-        <title>Panel de Control - Admisión</title>
-        <style>
-            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-            .card { background: white; padding: 2.5rem; border-radius: 12px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); text-align: center; max-width: 550px; }
-            .btn { background-color: #4f46e5; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; font-size: 16px; cursor: pointer; transition: background-color 0.2s; margin-top: 15px;}
-            .btn:hover { background-color: #4338ca; }
-            .btn:disabled { background-color: #94a3b8; cursor: not-allowed; }
-            .status { margin-top: 20px; font-weight: 500; color: #15803d; }
-            .file-input-container { margin: 20px 0; padding: 20px; border: 2px dashed #cbd5e1; border-radius: 8px; background: #f1f5f9;}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1 style="color: #1e293b; margin-top:0;">Oficina de Admisión</h1>
-            <p style="color: #64748b;">Carga el Excel de resultados para preparar la bandeja temporal de Admisión. Cada fila se retira cuando tiene un expediente registrado en el padrón.</p>
-            
-            <form id="uploadForm">
-                <div class="file-input-container">
-                    <input type="file" id="excelFile" accept=".xlsx" required />
-                </div>
-                <button type="submit" id="pubBtn" class="btn">
-                    Subir y Procesar Resultados
-                </button>
-            </form>
-            <div id="status" class="status"></div>
-        </div>
-        <script>
-            document.getElementById('uploadForm').addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const btn = document.getElementById('pubBtn');
-                const statusDiv = document.getElementById('status');
-                const fileInput = document.getElementById('excelFile');
-                
-                if (!fileInput.files.length) return;
-                
-                btn.disabled = true;
-                btn.innerText = "Procesando Excel...";
-                statusDiv.innerText = "";
-                
-                const formData = new FormData();
-                formData.append("file", fileInput.files[0]);
-                
-                try {
-                    // Ruta relativa: esta pagina se sirve en la raiz del modulo (:8009/),
-                    // donde el endpoint es /upload (no /api/mod-admision/upload).
-                    const res = await fetch('upload', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    
-                    const data = await res.json();
-                    if(res.ok) {
-                        fileInput.value = "";
-                        statusDiv.innerText = `✅ ${data.message}`;
-                        statusDiv.style.color = '#15803d';
-                    } else {
-                        throw new Error(data.detail || "Error al procesar el archivo");
-                    }
-                } catch (err) {
-                    statusDiv.innerText = `❌ ${err.message}`;
-                    statusDiv.style.color = '#dc2626';
-                } finally {
-                    btn.disabled = false;
-                    btn.innerText = "Subir y Procesar Resultados";
-                }
-            });
-        </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
+    return (
+        '<html lang="es"><meta charset="utf-8"><title>Admisión</title>'
+        '<h1>Módulo de Admisión</h1>'
+        '<p>Publica los resultados en Admisión desde tu sesión de SIGA.</p></html>'
+    )
 
 
 from typing import List
@@ -141,13 +71,16 @@ def _registrado_en_padron():
             .correlate(PostulanteAdmitido.__table__).exists())
 
 
-@app.post("/upload")
-async def upload_excel(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
+@app.post("/publicaciones/excel")
+async def publicar_excel(request: Request, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
     """Carga el Excel de resultados (hojas B_Datos y B_Datos_Exonerados).
 
     Reemplaza la lista de admitidos publicada; no toca la tabla de estudiantes
     (eso lo hace la ingesta de mod-gestion-academica).
     """
+    identidad = await get_identity(request, db)
+    if not es_superadmin(identidad) and not {"admin", "admin_admision"}.intersection(identidad.roles):
+        raise HTTPException(status_code=403, detail="No tiene permisos para publicar resultados de Admisión.")
     if not (file.filename or "").lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(status_code=400, detail="Suba el Excel de resultados en formato .xlsx.")
     contents = await file.read(MAX_EXCEL_BYTES + 1)
@@ -167,13 +100,11 @@ async def upload_excel(file: UploadFile = File(...), db: AsyncSession = Depends(
         # Serializa publicaciones concurrentes sin bloquear la lectura del padrón.
         await db.execute(text("LOCK TABLE admision_postulantes IN SHARE ROW EXCLUSIVE MODE"))
         await db.execute(delete(PostulanteAdmitido))
-        pendientes = [PostulanteAdmitido(**fila) for fila in filas]
-        db.add_all(pendientes)
+        db.add_all(PostulanteAdmitido(**fila) for fila in filas)
         await db.flush()
-        retirados = set((await db.scalars(
-            delete(PostulanteAdmitido).where(_registrado_en_padron()).returning(PostulanteAdmitido.id)
-        )).all())
-        ids_pendientes = [fila.id for fila in pendientes if fila.id not in retirados]
+        retirados = await db.execute(delete(PostulanteAdmitido).where(_registrado_en_padron()))
+        ya_registrados = retirados.rowcount
+        pendientes = len(filas) - ya_registrados
         await db.commit()
     except Exception:
         await db.rollback()
@@ -183,16 +114,16 @@ async def upload_excel(file: UploadFile = File(...), db: AsyncSession = Depends(
 
     sin_carrera = sum(1 for f in filas if resolver_programa_id(f["programa_nombre"]) is None)
     mensaje = f"Se procesaron {len(filas)} ingresantes. "
-    if ids_pendientes:
-        mensaje += (f"{len(ids_pendientes)} pendientes de registrar. "
+    if pendientes:
+        mensaje += (f"{pendientes} pendientes de registrar. "
                     "Usa «Sincronizar desde Admisión» en Registro de Estudiantes.")
     else:
         mensaje += "Todos tienen expediente en el padrón. La bandeja de Admisión quedó vacía."
     return {
         "message": mensaje,
         "total": len(filas),
-        "ids_pendientes": ids_pendientes,
-        "ya_registrados": len(retirados),
+        "pendientes": pendientes,
+        "ya_registrados": ya_registrados,
         "sin_carrera_reconocida": sin_carrera,
         "avisos": avisos[:50],
     }

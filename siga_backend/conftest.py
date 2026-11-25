@@ -171,6 +171,10 @@ async def clean_test_db():
             {"lock_id": SIGA_TEST_ADVISORY_LOCK_ID}
         )
         try:
+            if not await conn.scalar(text("SELECT to_regclass('public.docentes_periodo') IS NOT NULL")):
+                from tests.helpers.module_loader import load_module_component
+                tabla = load_module_component("mod-programas-estudio", "models").DocentePeriodo.__table__
+                await conn.run_sync(tabla.create, checkfirst=True)
             delete_tables = [
                 "evaluacion_registros",
                 "matricula_detalles",
@@ -181,6 +185,7 @@ async def clean_test_db():
                 "horarios_periodo",
                 "tutorias",
                 "carga_lectiva",
+                "docentes_periodo",
                 "perfiles_personal",
                 "core_user_roles",
                 "core_users",

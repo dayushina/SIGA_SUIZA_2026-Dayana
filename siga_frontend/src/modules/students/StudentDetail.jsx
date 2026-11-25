@@ -118,7 +118,7 @@ function EmptyState({ icon: Icon, title, description }) {
 const ESTADOS_ANULADOS = ['anulada', 'anulada_por_reserva'];
 
 // onChanged: avisa al listado que hubo una baja (desmatricula / eliminacion) para recargarlo.
-export function StudentDetail({ student, onClose, onChanged }) {
+export function StudentDetail({ student, programaNombre, onClose, onChanged }) {
   const bajas = useBajasEstudiante();
   const [reloadKey, setReloadKey] = useState(0);
   const [detail, setDetail] = useState(null);
@@ -220,7 +220,7 @@ export function StudentDetail({ student, onClose, onChanged }) {
 
   const s = detail || student;
   const initials = `${(s.nombres || '')[0] || ''}${(s.apellidos || '')[0] || ''}`.toUpperCase();
-  const programaNombre = PROGRAMAS[s.programa_id] || (s.programa_id ? `Programa ${s.programa_id}` : 'Sin carrera asignada');
+  const carreraNombre = programaNombre || PROGRAMAS[s.programa_id] || (s.programa_id ? `Programa ${s.programa_id}` : 'Sin carrera asignada');
 
   // Datos personales: columnas + metadata_admision (formato SIGA o Excel de Admision)
   const perfil = readStudentProfile(s);
@@ -340,7 +340,7 @@ export function StudentDetail({ student, onClose, onChanged }) {
                 </span>
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/15 border border-white/20 font-bold backdrop-blur-xs max-w-[320px] truncate">
                   <GraduationCap size={14} className="text-primary-light shrink-0" />
-                  <span className="truncate">{programaNombre}</span>
+                  <span className="truncate">{carreraNombre}</span>
                 </span>
               </div>
             </div>

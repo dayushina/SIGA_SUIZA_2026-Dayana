@@ -26,7 +26,7 @@ export function AdmissionModule() {
     try {
       // via gateway, do not puncture the module directly
       const token = localStorage.getItem('token');
-      const res = await fetch(`${API_BASE}/api/mod-admision/upload`, {
+      const res = await fetch(`${API_BASE}/api/mod-admision/publicaciones/excel`, {
         method: 'POST',
         headers: token ? { 'Authorization': `Bearer ${token}` } : {},
         body: formData
@@ -34,7 +34,7 @@ export function AdmissionModule() {
       
       const data = await res.json();
       
-      if (res.ok) {
+      if (res.ok && res.headers.get('X-Fallback') !== 'true') {
         form.reset();
         setFile(null);
         setMessage({ text: data.message || 'Archivo procesado con éxito.', type: 'success' });

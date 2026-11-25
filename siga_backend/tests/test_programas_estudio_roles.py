@@ -152,6 +152,83 @@ async def fix_entorno_programas(db_session: AsyncSession, fixture_evaluacion, fi
     }
 
 
+@pytest.mark.asyncio
+async def test_programa_obligatorio_y_docencia_por_periodo(client_prog, fix_entorno_programas, db_session):
+    await db_session.execute(text("""
+        INSERT INTO periodos_academicos (id, codigo, estado, fecha_inicio, fecha_fin)
+        VALUES (22, '2027-II', 'planificacion', now(), now() + interval '90 days')
+    """))
+    await db_session.execute(text("UPDATE perfiles_personal SET programa_estudio_id = 2 WHERE user_id = 11"))
+    await db_session.execute(text("""
+        INSERT INTO perfiles_personal (id, user_id, condicion_laboral, cargo_funcional, programa_estudio_id)
+        VALUES (30, 30, 'CONTRATADO', 'DOCENTE_AULA', 1)
+    """))
+    await db_session.execute(text("""
+        INSERT INTO docentes_periodo (docente_id, programa_id, periodo_id)
+        VALUES (11, 2, 22), (30, 1, 22), (2, 1, 22)
+    """))
+    for tabla in ("core_users", "perfiles_personal"):
+        await db_session.execute(text(f"""
+            SELECT setval('{tabla}_id_seq', GREATEST((SELECT max(id) FROM {tabla}), nextval('{tabla}_id_seq')))
+        """))
+    await db_session.commit()
+
+    app = FastAPI()
+    app.include_router(load_module_component("mod-usuarios", "routes").router)
+    admin = auth_headers(1)
+    coord = auth_headers(2)
+    roster = "/programas/1/docentes-disponibles"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://usuarios") as usuarios:
+        for rol in (2, 3, 4):
+            datos = {"email": f"programa.rol{rol}@siga.edu", "full_name": f"Usuario Programa {rol}",
+                     "password": "Solo-Prueba-2026", "role_ids": [rol]}
+            assert (await usuarios.post("/usuarios", json=datos, headers=admin)).status_code == 422
+            assert (await usuarios.post("/usuarios", json={**datos, "programa_estudio_id": 2}, headers=admin)).status_code == 422
+            r = await usuarios.post("/usuarios", json={**datos, "programa_estudio_id": 1}, headers=admin)
+            assert r.status_code == 201, r.text
+            assert r.json()["programa_estudio_id"] == 1
+            if rol == 3:
+                docente = r.json()["id"]
+            if rol == 4:
+                assert r.json()["id"] not in {p["usuario"]["id"] for p in (await usuarios.get("/personal")).json()}
+
+        assert (await client_prog.get(roster, params={"periodo_id": 22}, headers=coord)).json() == []
+        assert (await client_prog.get(roster, params={"periodo_id": 1}, headers=coord)).json()[0]["id"] == 10
+        assert (await client_prog.get(roster, params={"periodo_id": 22}, headers=auth_headers(3))).status_code == 403
+        url = f"/usuarios/{docente}"
+        r = await usuarios.put(url, json={"periodos_docencia_ids": [999999]}, headers=admin)
+        assert r.status_code == 422
+        r = await usuarios.put(url, json={"periodos_docencia_ids": [22, 22]}, headers=admin)
+        assert r.status_code == 200 and r.json()["periodos_docencia_ids"] == [22], r.text
+
+        listado = await client_prog.get(roster, params={"periodo_id": 22}, headers=coord)
+        assert listado.headers["cache-control"] == "no-store"
+        assert [d["id"] for d in listado.json()] == [docente]
+        assert [d["id"] for d in (await client_prog.get(roster, params={"periodo_id": 1}, headers=coord)).json()] == [10]
+
+        carga = {"periodo_id": 22, "unidad_didactica_id": 101, "turno": "Mañana", "seccion": "B"}
+        ruta = "/programas/1/carga-lectiva"
+        for ajeno in (10, 11, 30, 2):
+            assert (await client_prog.post(ruta, json={**carga, "docente_id": ajeno}, headers=coord)).status_code == 422
+        r = await client_prog.post(ruta, json={**carga, "docente_id": docente}, headers=coord)
+        assert r.status_code == 201, r.text
+        assert (await usuarios.put(url, json={"programa_estudio_id": None}, headers=admin)).status_code == 422
+        assert (await usuarios.put(url, json={"role_ids": [4]}, headers=admin)).status_code == 200
+        assert (await client_prog.get(roster, params={"periodo_id": 22}, headers=coord)).json() == []
+        assert (await client_prog.get(ruta, params={"periodo_id": 22}, headers=coord)).json()[0]["docente_id"] == docente
+
+        personal = {"email": "personal.programa@siga.edu", "full_name": "Docente de Personal",
+                    "password": "Solo-Prueba-2026", "cargo_funcional": "DOCENTE_AULA",
+                    "condicion_laboral": "NOMBRADO_ESTADO"}
+        assert (await usuarios.post("/personal", json=personal, headers=admin)).status_code == 422
+        r = await usuarios.post("/personal", json={**personal, "programa_estudio_id": 1}, headers=admin)
+        assert r.status_code == 201, r.text
+        perfil = r.json()["perfil"]["id"]
+        r = await usuarios.put(f"/personal/{perfil}", json={"cargo_funcional": "JEFE_AREA"}, headers=admin)
+        assert r.status_code == 200, r.text
+        assert {rol["name"] for rol in r.json()["usuario"]["roles"]} == {"docente", "coordinador_programa"}
+
+
 # ==============================================================================
 # 1. VALIDACIÓN DE IDENTIDAD Y TOKENS (401)
 # ==============================================================================
@@ -429,6 +506,17 @@ async def test_reglas_negocio_carga_lectiva_y_blindaje_actas(client_prog, fix_en
         VALUES (:id, '2027-I', 'planificacion', NOW(), NOW() + interval '90 days')
         ON CONFLICT (id) DO NOTHING;
     """), {"id": p_destino})
+    await db_session.commit()
+
+    r_clonar_sin_habilitar = await client_prog.post(
+        f"/programas/{prog_1}/carga-lectiva/clonar",
+        json={"from_periodo_id": p_id, "to_periodo_id": p_destino},
+        headers=auth_headers(coord_a)
+    )
+    assert r_clonar_sin_habilitar.status_code == 422
+    await db_session.execute(text("""
+        INSERT INTO docentes_periodo (docente_id, programa_id, periodo_id) VALUES (:doc, :prog, :per)
+    """), {"doc": doc_a, "prog": prog_1, "per": p_destino})
     await db_session.commit()
 
     r_clonar = await client_prog.post(

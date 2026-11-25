@@ -3,11 +3,15 @@ import { apiClient } from '../../core/api/client';
 import { useToast } from '../../core/ui/ToastContext';
 import { Plus, Pencil, X, UserX, Users, ShieldCheck } from 'lucide-react';
 
+const ROLES_CON_PROGRAMA = ['secretaria_programa', 'coordinador_programa', 'docente', 'estudiante'];
+
 export function UserManagement() {
   const toast = useToast();
   const [users, setUsers] = useState([]);
   const [roles, setRoles] = useState([]);
   const [programas, setProgramas] = useState([]);
+  const [periodos, setPeriodos] = useState(null);
+  const [errorPeriodos, setErrorPeriodos] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({
@@ -18,9 +22,12 @@ export function UserManagement() {
     is_superuser: false,
     role_ids: [],
     programa_estudio_id: '',
+    periodos_docencia_ids: [],
   });
   const [editingId, setEditingId] = useState(null);
-  const requierePrograma = roles.some(rol => rol.name === 'secretaria_programa' && formData.role_ids.includes(rol.id));
+  const rolesSeleccionados = roles.filter(rol => formData.role_ids.includes(rol.id)).map(rol => rol.name);
+  const requierePrograma = rolesSeleccionados.some(rol => ROLES_CON_PROGRAMA.includes(rol));
+  const esDocente = rolesSeleccionados.includes('docente');
 
   useEffect(() => {
     if (!showModal) return;
@@ -30,6 +37,21 @@ export function UserManagement() {
       .catch(() => { if (activo) setProgramas([]); });
     return () => { activo = false; };
   }, [showModal]);
+
+  useEffect(() => {
+    if (!showModal || !esDocente) return;
+    let activo = true;
+    setPeriodos(null);
+    setErrorPeriodos(false);
+    apiClient.request('/api/mod-programas-estudio/periodos')
+      .then(data => {
+        if (!activo) return;
+        if (Array.isArray(data)) setPeriodos(data);
+        else setErrorPeriodos(true);
+      })
+      .catch(() => { if (activo) setErrorPeriodos(true); });
+    return () => { activo = false; };
+  }, [showModal, esDocente]);
 
   const loadData = async () => {
     setLoading(true);
@@ -51,7 +73,8 @@ export function UserManagement() {
     const { name, value, type, checked } = e.target;
     setFormData(prev => ({
       ...prev,
-      [name]: type === 'checkbox' ? checked : value
+      [name]: type === 'checkbox' ? checked : value,
+      ...(name === 'programa_estudio_id' ? { periodos_docencia_ids: [] } : {}),
     }));
   };
 
@@ -65,7 +88,7 @@ export function UserManagement() {
   };
 
   const openNewUserModal = () => {
-    setFormData({ email: '', full_name: '', password: '', is_active: true, is_superuser: false, role_ids: [], programa_estudio_id: '' });
+    setFormData({ email: '', full_name: '', password: '', is_active: true, is_superuser: false, role_ids: [], programa_estudio_id: '', periodos_docencia_ids: [] });
     setEditingId(null);
     setShowModal(true);
   };
@@ -78,6 +101,7 @@ export function UserManagement() {
       is_superuser: user.is_superuser,
       role_ids: user.roles.map(r => r.id),
       programa_estudio_id: user.programa_estudio_id ?? '',
+      periodos_docencia_ids: user.periodos_docencia_ids ?? [],
       password: '' // empty so it won't be updated unless provided (not implemented for update yet)
     });
     setEditingId(user.id);
@@ -100,6 +124,7 @@ export function UserManagement() {
     } else {
       delete payload.programa_estudio_id;
     }
+    if (!esDocente || periodos === null) delete payload.periodos_docencia_ids;
     try {
       if (editingId) {
         const updateData = { ...payload };
@@ -350,9 +375,42 @@ export function UserManagement() {
                       {programas.map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
                     </select>
                     <span className="mt-1 block text-xs font-normal text-slate-600">
-                      Esta asignación determina los estudiantes que la cuenta puede consultar y matricular.
+                      Indica el programa al que pertenece la cuenta.
                     </span>
                   </label>
+                )}
+
+                {esDocente && formData.programa_estudio_id && (
+                  <fieldset className="space-y-2">
+                    <legend className="text-sm font-semibold text-slate-700">Periodos lectivos habilitados para docencia</legend>
+                    <p className="text-xs text-slate-600">
+                      Selecciona los periodos en los que el docente podrá recibir carga lectiva para este programa.
+                      Las cargas existentes mantienen vinculado al docente a esos periodos.
+                    </p>
+                    {periodos?.length > 0 ? (
+                      <div className="grid grid-cols-2 gap-2">
+                        {periodos.map(periodo => (
+                          <label key={periodo.id} className="flex items-center gap-2 rounded-lg border border-slate-200 p-2 text-sm">
+                            <input type="checkbox"
+                              checked={formData.periodos_docencia_ids.includes(periodo.id)}
+                              onChange={e => {
+                                const { checked } = e.target;
+                                setFormData(prev => ({
+                                  ...prev,
+                                  periodos_docencia_ids: checked
+                                    ? [...prev.periodos_docencia_ids, periodo.id]
+                                    : prev.periodos_docencia_ids.filter(id => id !== periodo.id),
+                                }));
+                              }} />
+                            {periodo.codigo}
+                          </label>
+                        ))}
+                      </div>
+                    ) : <p role="status" className="text-xs text-slate-600">
+                      {errorPeriodos ? 'No se pudieron consultar los periodos lectivos.'
+                        : periodos === null ? 'Cargando periodos lectivos…' : 'No hay periodos lectivos registrados.'}
+                    </p>}
+                  </fieldset>
                 )}
 
                 <div className="flex justify-end space-x-3 pt-6 border-t border-slate-100 mt-6">

@@ -5,7 +5,7 @@ import { SIGAAIAssistant } from '../core/ai/SIGAAIAssistant';
 import {
   LayoutDashboard, GraduationCap, Users, ClipboardList, ClipboardCheck,
   LineChart, Eye, ScrollText, BookOpen, CreditCard, Settings, Bell, LogOut,
-  KeyRound, User, ChevronDown, ShieldCheck,
+  KeyRound, User, UserPlus, ChevronDown, ShieldCheck,
 } from 'lucide-react';
 
 export function DashboardLayout({ children, currentView, onNavigate }) {
@@ -337,12 +337,19 @@ export function DashboardLayout({ children, currentView, onNavigate }) {
                     label="Finanzas y Pagos"
                   />
                 )}
-                {['superadmin', 'admin'].some(r => userRoles.includes(r)) && (
+                {['superadmin', 'admin'].some(r => userRoles.includes(r)) ? (
                   <NavItem
                     active={currentView === 'admin'}
                     onClick={() => onNavigate('admin')}
                     icon={Settings}
                     label="Administración"
+                  />
+                ) : userRoles.includes('admin_admision') && (
+                  <NavItem
+                    active={currentView === 'admission'}
+                    onClick={() => onNavigate('admission')}
+                    icon={UserPlus}
+                    label="Admisión"
                   />
                 )}
               </div>

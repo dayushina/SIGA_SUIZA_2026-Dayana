@@ -70,3 +70,20 @@ async def test_asignacion_obligatoria_y_padron_acotado(db_session, fixture_progr
         assert r.json() == []
         r = await a.get("/estudiantes/", params={"programa_id": 2}, headers=secretaria)
         assert r.status_code == 403
+
+        catalogo = {"catalogo_implementado": True}
+        r = await a.get("/estudiantes/", params={**catalogo, "programa_id": 1}, headers=admin)
+        assert r.status_code == 200, r.text
+        assert {e["id"] for e in r.json()} & {200, 201} == {200}
+
+        r = await a.get("/estudiantes/", params={**catalogo, "programa_id": 999}, headers=admin)
+        assert r.status_code == 422
+
+        estudiante = {
+            "dni": "90000300", "codigo_estudiante": "P-300", "nombres": "Nueva",
+            "apellidos": "Estudiante", "programa_id": 999,
+        }
+        r = await a.post("/estudiantes/", params=catalogo, json=estudiante, headers=admin)
+        assert r.status_code == 422
+        r = await a.post("/estudiantes/", params=catalogo, json={**estudiante, "programa_id": 1}, headers=admin)
+        assert r.status_code == 201, r.text

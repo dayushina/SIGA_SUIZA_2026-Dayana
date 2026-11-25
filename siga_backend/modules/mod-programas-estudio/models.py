@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, Boolean, TIMESTAMP, ForeignKey, JSON, Date
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
-from database import BaseModel
+from database import Base, BaseModel
 
 class ProgramaEstudio(BaseModel):
     """Modelo para programas de estudio (carreras)"""
@@ -33,6 +33,16 @@ class PeriodoAcademico(BaseModel):
     # Nuevos campos para precisión de Matrícula Regular vs Extemporánea
     fecha_fin_matricula_regular = Column(TIMESTAMP)
     fecha_fin_matricula_extemporanea = Column(TIMESTAMP)
+
+
+class DocentePeriodo(Base):
+    """Docentes habilitados para recibir carga en un programa y periodo."""
+    __tablename__ = "docentes_periodo"
+
+    programa_id = Column(Integer, ForeignKey("programas_estudio.id", ondelete="CASCADE"), primary_key=True)
+    periodo_id = Column(Integer, ForeignKey("periodos_academicos.id", ondelete="CASCADE"), primary_key=True)
+    docente_id = Column(Integer, primary_key=True, index=True)  # Referencia a core_users
+
 
 class ProgramaConfiguracion(BaseModel):
     """Configuración por periodo académico"""

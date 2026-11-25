@@ -32,11 +32,10 @@ beforeEach(() => {
   globalThis.fetch = vi.fn((url, opts = {}) => {
     const metodo = opts.method || 'GET';
     llamadas.push(`${metodo} ${url}`);
-    if (url.includes('/mod-admision/resumen')) return json(resumen);
-    if (url.includes('/mod-admision/upload')) {
-      resumen = { total: 2, pendientes: 2 - estudiantes.length, sincronizados: estudiantes.length };
-      return json({ total: 2, ids_pendientes: [1, 2], avisos: [] });
+    if (url.endsWith('/mod-programas-estudio/programas?implementados=true')) {
+      return json([{ id: 4, nombre: 'Contabilidad' }, { id: 2, nombre: 'Enfermería Técnica' }]);
     }
+    if (url.includes('/mod-admision/resumen')) return json(resumen);
     if (url.includes('/mod-admision/admitidos?solo_pendientes=true')) {
       return json({ admitidos: ['11111111', '22222222'].filter(dni => !estudiantes.some(e => e.dni === dni)).map(admitido) });
     }
@@ -68,6 +67,15 @@ function renderVista() {
 }
 
 describe('Registro de Estudiantes: sincronizar ingresantes de Admisión', () => {
+  it('muestra sincronización y alta individual en la cabecera, sin opción de publicar archivos', async () => {
+    renderVista();
+    await screen.findByTestId('admision-pendientes-banner');
+    expect(screen.getByRole('button', { name: /^Sincronizar desde Admisión/ })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Registrar Estudiante' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: /Cargar Excel/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('admision-excel-input')).not.toBeInTheDocument();
+  });
+
   it('"Registrar ahora" confirma, registra a los pendientes y actualiza el resumen', async () => {
     renderVista();
 
@@ -100,22 +108,21 @@ describe('Registro de Estudiantes: sincronizar ingresantes de Admisión', () => 
     expect(llamadas.some(l => l.includes('/admision/ingesta'))).toBe(false);
   });
 
-  it('permite reintentar desde Admisión si la publicación del Excel se guardó y la ingesta falló', async () => {
+  it('permite reintentar la sincronización sobre la lista ya publicada', async () => {
     ingestaInterrumpida = true;
     renderVista();
 
-    const archivo = new File(['contenido de prueba'], 'ADMISION_2026.xlsx');
-    fireEvent.change(screen.getByTestId('admision-excel-input'), { target: { files: [archivo] } });
+    const boton = screen.getByRole('button', { name: /^Sincronizar desde Admisión/ });
+    fireEvent.click(boton);
     fireEvent.click(await screen.findByTestId('confirm-modal-ok'));
-    expect(await screen.findByText(/El Excel se publicó en Admisión.*Puedes reintentar/)).toBeInTheDocument();
+    expect(await screen.findByText('Gestión Académica no disponible.')).toBeInTheDocument();
 
     ingestaInterrumpida = false;
-    const boton = screen.getByRole('button', { name: /^Sincronizar desde Admisión/ });
     await waitFor(() => expect(boton).toBeEnabled());
     fireEvent.click(boton);
     fireEvent.click(await screen.findByTestId('confirm-modal-ok'));
     expect(await screen.findByText(/Sincronización completa: 2 estudiantes nuevos/)).toBeInTheDocument();
-    expect(llamadas.filter(l => l === 'POST /api/mod-admision/upload')).toHaveLength(1);
+    expect(llamadas.some(l => l.startsWith('POST /api/mod-admision/'))).toBe(false);
     expect(llamadas.filter(l => l === 'POST /api/mod-gestion-academica/admision/ingesta')).toHaveLength(2);
   });
 
@@ -127,5 +134,25 @@ describe('Registro de Estudiantes: sincronizar ingresantes de Admisión', () => 
     expect(screen.queryByTestId('admision-pendientes-banner')).not.toBeInTheDocument();
     expect(screen.queryByTestId('confirm-modal')).not.toBeInTheDocument();
     expect(llamadas.some(l => l.includes('/admision/ingesta'))).toBe(false);
+  });
+});
+
+describe('Registro de Estudiantes: catálogo implementado', () => {
+  it('lista solo las carreras del catálogo y filtra por su ID real', async () => {
+    estudiantes = [{
+      id: 1, dni: '11111111', nombres: 'ANA', apellidos: 'PEREZ', programa_id: 5,
+      metadata_admision: { 'PROGRAMA DE   ESTUDIOS': 'Contabilidad' },
+    }];
+    renderVista();
+    fireEvent.click(screen.getByRole('button', { name: /Todos los Programas/i }));
+
+    await screen.findByRole('option', { name: 'Enfermería Técnica' });
+    expect(screen.getAllByRole('option').filter(option => option.tagName === 'BUTTON').map(option => option.textContent))
+      .toEqual(['Todos los Programas', 'Contabilidad', 'Enfermería Técnica']);
+    fireEvent.click(screen.getByRole('option', { name: 'Contabilidad' }));
+    await waitFor(() => expect(llamadas).toContain(
+      'GET /api/mod-gestion-academica/estudiantes/?programa_id=4&catalogo_implementado=true',
+    ));
+    expect(await screen.findByTitle('Contabilidad')).toBeVisible();
   });
 });
