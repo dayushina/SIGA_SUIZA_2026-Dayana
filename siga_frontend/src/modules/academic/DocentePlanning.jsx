@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../core/auth/useAuth';
 import { apiClient } from '../../core/api/client';
 import { useToast } from '../../core/ui/ToastContext';
+import { useDocenteContexto } from './useDocenteContexto';
 import { GraduationCap, Calendar, ClipboardList, BookOpen, FileText, Upload, ExternalLink, CheckCircle2, RefreshCw } from 'lucide-react';
 
 function useSafeToast() {
@@ -29,104 +30,51 @@ function useSafeToast() {
 
 export function DocentePlanning() {
   const { user } = useAuth();
+  const {
+    isAdmin, programs, periods, selectedProgram, setSelectedProgram, selectedPeriod, setSelectedPeriod,
+    cargasDelPeriodo: cargaActiva, programaAsignado, cargandoContexto, errorContexto, errorCarga,
+  } = useDocenteContexto(user);
   const { toast } = useSafeToast();
-
   const [loading, setLoading] = useState(false);
-  const [programs, setPrograms] = useState([]);
-  const [periods, setPeriods] = useState([]);
-
-  const [selectedProgram, setSelectedProgram] = useState('');
-  const [selectedPeriod, setSelectedPeriod] = useState('');
-
   const [planActual, setPlanActual] = useState(null);
-
-  const [cargaLectiva, setCargaLectiva] = useState([]);
   const [mallaFlat, setMallaFlat] = useState([]);
   const [silabos, setSilabos] = useState([]);
-  const [_PLANES, setPlanes] = useState([]);
 
-  // Fetch initial data
+  const requiereMalla = cargaActiva.some(c => !c.unidad_nombre);
   useEffect(() => {
-    const fetchInitial = async () => {
-      try {
-        const [progRes, perRes, loadRes] = await Promise.all([
-          apiClient.request('/api/mod-programas-estudio/programas').catch(() => []),
-          apiClient.request('/api/mod-programas-estudio/periodos').catch(() => []),
-          user?.id ? apiClient.request(`/api/mod-programas-estudio/docentes/${user.id}/carga-lectiva`).catch(() => []) : Promise.resolve([])
-        ]);
-        setPrograms(progRes || []);
-        setPeriods(perRes || []);
-        setCargaLectiva(loadRes || []);
+    setMallaFlat([]);
+    if (!selectedProgram || !requiereMalla) return;
+    const controller = new AbortController();
+    apiClient.request(`/api/mod-programas-estudio/programas/${selectedProgram}/malla`, { signal: controller.signal })
+      .then(res => {
+        if (!controller.signal.aborted && Array.isArray(res)) setMallaFlat(res.flatMap(modulo => modulo.unidades ?? []));
+      })
+      .catch(error => {
+        if (!controller.signal.aborted) console.error('Error fetching malla', error);
+      });
+    return () => controller.abort();
+  }, [selectedProgram, requiereMalla]);
 
-        let initProg = '';
-        let initPer = '';
-        if (loadRes && loadRes.length > 0) {
-          initProg = loadRes[0].programa_id.toString();
-          initPer = loadRes[0].periodo_id.toString();
-        }
-        if (!initProg && progRes && progRes.length > 0) {
-          initProg = progRes[0].id.toString();
-        }
-        if (!initPer && perRes && perRes.length > 0) {
-          const active = perRes.find(p => p.estado === 'matricula_abierta' || p.estado === 'abierto' || p.estado === 'ACTIVO');
-          initPer = active ? active.id.toString() : perRes[perRes.length - 1].id.toString();
-        }
-        if (initProg) setSelectedProgram(initProg);
-        if (initPer) setSelectedPeriod(initPer);
-      } catch (e) {
-        console.error('Error fetching initial data', e);
-      }
-    };
-    if (user) {
-      fetchInitial();
-    }
-  }, [user]);
-
-  // Fetch malla when program changes (to get unidad names)
   useEffect(() => {
-    if (!selectedProgram) {
-      setMallaFlat([]);
+    setPlanActual(null);
+    setSilabos([]);
+    if (!selectedProgram || !selectedPeriod || !user?.id) {
+      setLoading(false);
       return;
     }
-    const fetchMalla = async () => {
-      try {
-        const res = await apiClient.request(`/api/mod-programas-estudio/programas/${selectedProgram}/malla`);
-        const flat = [];
-        (res || []).forEach(modulo => {
-          (modulo.unidades || []).forEach(ud => {
-            flat.push({ ...ud, modulo_nombre: modulo.nombre, periodo_sugerido: modulo.periodo });
-          });
-        });
-        setMallaFlat(flat);
-      } catch (e) {
-        console.error('Error fetching malla', e);
-      }
-    };
-    fetchMalla();
-  }, [selectedProgram]);
-
-  // Fetch Silabos and Planes when Period changes
-  useEffect(() => {
-    if (!selectedProgram || !selectedPeriod || !user?.id) return;
-
-    const fetchData = async () => {
-      setLoading(true);
-      try {
-        // Planes
-        const planesRes = await apiClient.request(`/api/mod-programas-estudio/docente/${user.id}/planes-trabajo?periodo_id=${selectedPeriod}`).catch(() => []);
-        // Silabos
-        const silabosRes = await apiClient.request(`/api/mod-programas-estudio/docente/${user.id}/silabos`).catch(() => []);
-
-        setPlanes(planesRes || []);
-        const plan = (planesRes || []).find(p => String(p.programa_id) === String(selectedProgram)) || (planesRes && planesRes.length > 0 ? planesRes[0] : null);
-        setPlanActual(plan || null);
-        setSilabos(silabosRes || []);
-      } catch (e) {
-        console.error('Error fetching planning data', e);
-      }
+    const controller = new AbortController();
+    const opciones = { signal: controller.signal, cache: 'no-store' };
+    setLoading(true);
+    Promise.allSettled([
+      apiClient.request(`/api/mod-programas-estudio/docente/${user.id}/planes-trabajo?periodo_id=${selectedPeriod}&programa_id=${selectedProgram}`, opciones),
+      apiClient.request(`/api/mod-programas-estudio/docente/${user.id}/silabos`, opciones),
+    ]).then(([planes, documentos]) => {
+      if (controller.signal.aborted) return;
+      if (Array.isArray(planes.value)) setPlanActual(planes.value.find(p => String(p.programa_id) === selectedProgram) ?? null);
+      if (Array.isArray(documentos.value)) setSilabos(documentos.value);
       setLoading(false);
-    };
-    fetchData();
+    });
+    return () => controller.abort();
   }, [selectedProgram, selectedPeriod, user?.id]);
 
   const fileInputRefSilabo = useRef(null);
@@ -233,11 +181,12 @@ export function DocentePlanning() {
       toast.success("Plan de Trabajo enviado correctamente al Coordinador");
 
       // Refresh planes con tolerancia a fallos
-      const planesRes = await apiClient.request(`/api/mod-programas-estudio/docente/${user.id}/planes-trabajo?periodo_id=${selectedPeriod}`).catch(() => []);
-      if (planesRes) {
-        setPlanes(planesRes);
-        const plan = planesRes.find(p => String(p.programa_id) === String(selectedProgram)) || (planesRes.length > 0 ? planesRes[0] : null);
-        setPlanActual(plan || null);
+      const planesRes = await apiClient.request(
+        `/api/mod-programas-estudio/docente/${user.id}/planes-trabajo?periodo_id=${selectedPeriod}&programa_id=${selectedProgram}`,
+        { cache: 'no-store' },
+      ).catch(() => []);
+      if (Array.isArray(planesRes)) {
+        setPlanActual(planesRes.find(p => String(p.programa_id) === selectedProgram) ?? null);
       }
     } catch (err) {
       toast.error(err.message || "Error al enviar el Plan de Trabajo");
@@ -255,12 +204,6 @@ export function DocentePlanning() {
     return ud ? ud.nombre : `Unidad #${udId}`;
   };
 
-  // Filtrar carga lectiva del periodo activo y programa
-  const cargaActiva = cargaLectiva.filter(c => 
-    (!selectedPeriod || String(c.periodo_id) === String(selectedPeriod)) &&
-    (!selectedProgram || String(c.programa_id) === String(selectedProgram))
-  );
-
   return (
     <div className="space-y-6">
       {/* Cabecera Informativa y Filtros del Docente */}
@@ -271,7 +214,7 @@ export function DocentePlanning() {
           </div>
           <div className="flex-1">
             <p className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider mb-1">Programa de Estudios</p>
-            <select
+            {isAdmin ? <select
               className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-primary"
               value={selectedProgram}
               onChange={(e) => setSelectedProgram(e.target.value)}
@@ -280,7 +223,11 @@ export function DocentePlanning() {
               {programs.map((p) => (
                 <option key={p.id} value={p.id}>{p.nombre}</option>
               ))}
-            </select>
+            </select> : (
+              <p className="text-xs font-bold text-slate-800">
+                {programs[0]?.nombre || (cargandoContexto ? 'Cargando…' : programaAsignado ? 'Programa no disponible' : 'Sin programa asignado')}
+              </p>
+            )}
           </div>
         </div>
         <div className="flex items-center space-x-3">
@@ -302,6 +249,12 @@ export function DocentePlanning() {
           </div>
         </div>
       </div>
+
+      {(errorContexto || errorCarga) && (
+        <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
+          {errorContexto || errorCarga}
+        </p>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Plan de Trabajo Global */}
@@ -353,7 +306,8 @@ export function DocentePlanning() {
                   <p className="text-sm text-slate-500 mb-4">Aún no has presentado tu plan de trabajo para este periodo.</p>
                   <button 
                     onClick={triggerUploadPlan}
-                    className="btn-primary w-full py-2 rounded-lg text-sm"
+                    disabled={!selectedProgram || !selectedPeriod}
+                    className="btn-primary w-full py-2 rounded-lg text-sm disabled:opacity-50"
                   >
                     <Upload className="w-4 h-4 mr-1 inline" /> Subir Plan de Trabajo
                   </button>
@@ -380,11 +334,11 @@ export function DocentePlanning() {
                 </div>
               </div>
 
-              {loading ? (
+              {loading || cargandoContexto ? (
                 <div className="text-center py-10">
                   <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto"></div>
                 </div>
-              ) : cargaActiva.length === 0 ? (
+              ) : errorContexto || errorCarga || !selectedProgram || !selectedPeriod ? null : cargaActiva.length === 0 ? (
                 <div className="text-center p-8 bg-slate-50 rounded-xl border border-slate-100">
                   <p className="text-slate-500">No tienes carga lectiva asignada para este periodo en este programa.</p>
                 </div>

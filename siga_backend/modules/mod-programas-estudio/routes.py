@@ -837,33 +837,31 @@ async def clonar_carga_lectiva(programa_id: int, req: ClonarCargaRequest, reques
     return {"message": f"Se clonaron {len(nuevas_cargas)} registros de carga lectiva."}
 
 @router.get("/docentes/{docente_id}/carga-lectiva", response_model=List[CargaLectivaResponse])
-async def listar_carga_docente(docente_id: int, request: Request, periodo_id: Optional[int] = None, db: AsyncSession = Depends(get_db)):
+@router.get("/docente/{docente_id}/carga-lectiva", response_model=List[CargaLectivaResponse])
+async def listar_carga_docente(
+    docente_id: int, request: Request, response: Response, periodo_id: Optional[int] = None,
+    programa_id: Optional[int] = None, db: AsyncSession = Depends(get_db),
+):
     ident = await get_identity(request, db)
     await _validar_acceso_docente(ident, docente_id, db)
+    response.headers["Cache-Control"] = "no-store"
 
-    query = select(CargaLectiva).where(CargaLectiva.docente_id == docente_id)
-    if periodo_id:
+    query = (
+        select(CargaLectiva, ProgramaUnidad, ProgramaModulo.nombre, ProgramaModulo.periodo, ProgramaEstudio.nombre)
+        .outerjoin(ProgramaUnidad, ProgramaUnidad.id == CargaLectiva.unidad_didactica_id)
+        .outerjoin(ProgramaModulo, ProgramaModulo.id == ProgramaUnidad.programa_modulo_id)
+        .outerjoin(ProgramaEstudio, ProgramaEstudio.id == CargaLectiva.programa_id)
+        .where(CargaLectiva.docente_id == docente_id)
+        .order_by(CargaLectiva.id)
+    )
+    if periodo_id is not None:
         query = query.where(CargaLectiva.periodo_id == periodo_id)
-    result = await db.execute(query)
-    cargas = result.scalars().all()
+    if programa_id is not None:
+        query = query.where(CargaLectiva.programa_id == programa_id)
+    filas = await db.execute(query)
 
-    items = []
-    for c in cargas:
-        res_u = await db.execute(select(ProgramaUnidad).where(ProgramaUnidad.id == c.unidad_didactica_id))
-        u = res_u.scalar_one_or_none()
-        modulo_nombre = None
-        ciclo = None
-        if u and u.programa_modulo_id:
-            res_m = await db.execute(select(ProgramaModulo).where(ProgramaModulo.id == u.programa_modulo_id))
-            m = res_m.scalar_one_or_none()
-            if m:
-                modulo_nombre = m.nombre
-                ciclo = m.periodo
-
-        res_p = await db.execute(select(ProgramaEstudio).where(ProgramaEstudio.id == c.programa_id))
-        p = res_p.scalar_one_or_none()
-
-        item = CargaLectivaResponse(
+    return [
+        CargaLectivaResponse(
             id=c.id,
             programa_id=c.programa_id,
             periodo_id=c.periodo_id,
@@ -874,14 +872,14 @@ async def listar_carga_docente(docente_id: int, request: Request, periodo_id: Op
             estado=c.estado,
             created_at=c.created_at,
             unidad_nombre=u.nombre if u else f"Unidad #{c.unidad_didactica_id}",
-            programa_nombre=p.nombre if p else None,
+            programa_nombre=programa_nombre,
             modulo_nombre=modulo_nombre,
             ciclo=ciclo,
             creditos=u.creditos if u else None,
-            horas=((u.horas_teoria or 0) + (u.horas_practica or 0)) if u else None
+            horas=((u.horas_teoria or 0) + (u.horas_practica or 0)) if u else None,
         )
-        items.append(item)
-    return items
+        for c, u, modulo_nombre, ciclo, programa_nombre in filas
+    ]
 
 @router.post("/programas/{programa_id}/horarios", response_model=HorarioPeriodoResponse, status_code=status.HTTP_201_CREATED)
 async def crear_horario(programa_id: int, horario: HorarioPeriodoCreate, request: Request, db: AsyncSession = Depends(get_db)):
@@ -1260,12 +1258,6 @@ class PlanTrabajoDocenteResponse(PlanTrabajoDocenteBase):
 
 # --- Endpoints Docente (Sílabos y Planes) ---
 from models import Silabo, PlanTrabajoDocente
-
-@router.get("/docente/{docente_id}/carga-lectiva", response_model=List[CargaLectivaResponse])
-async def obtener_carga_docente(docente_id: int, request: Request, periodo_id: Optional[int] = None, db: AsyncSession = Depends(get_db)):
-    ident = await get_identity(request, db)
-    await _validar_acceso_docente(ident, docente_id, db)
-    return await listar_carga_docente(docente_id=docente_id, request=request, periodo_id=periodo_id, db=db)
 
 @router.post("/silabos", response_model=SilaboResponse, status_code=status.HTTP_201_CREATED)
 async def crear_silabo(silabo: SilaboCreate, request: Request, db: AsyncSession = Depends(get_db)):

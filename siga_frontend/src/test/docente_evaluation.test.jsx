@@ -7,9 +7,10 @@ import { DocentePlanning } from '../modules/academic/DocentePlanning';
 import { apiClient } from '../core/api/client';
 
 // Mock del contexto de autenticación
+let usuario;
 vi.mock('../core/auth/useAuth', () => ({
   useAuth: () => ({
-    user: { id: 10, email: 'docente.test@siga.edu', full_name: 'Prof. Roberto Saboya', role: 'docente' },
+    user: usuario,
     token: 'fake-jwt-token'
   })
 }));
@@ -24,6 +25,81 @@ vi.mock('../core/api/client', () => ({
 describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanning)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    usuario = { id: 10, email: 'docente.test@siga.edu', full_name: 'Prof. Roberto Saboya', role: 'docente', programa_id: 1 };
+  });
+
+  it('muestra el programa del perfil en ambas pestañas cuando todavía no hay carga lectiva', async () => {
+    usuario.programa_id = 5;
+    apiClient.request.mockImplementation(async (endpoint) => {
+      if (endpoint.endsWith('/programas')) return [{ id: 6, nombre: 'Contabilidad' }, { id: 5, nombre: 'Desarrollo de Sistemas de Información' }];
+      if (endpoint.endsWith('/periodos')) return [{ id: 6, codigo: '2026-I', estado: 'en_curso' }];
+      if (endpoint.includes('/planes-trabajo')) return [{ programa_id: 6, estado: 'aprobado', archivo_url: '/contabilidad.pdf' }];
+      return [];
+    });
+
+    render(<EvaluationDashboard />);
+    expect(await screen.findByText('Desarrollo de Sistemas de Información')).toBeVisible();
+    expect(screen.queryByText('Contabilidad')).not.toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toBeDisabled();
+    expect(screen.getByText(/No tienes unidades didácticas asignadas/)).toBeVisible();
+    expect(apiClient.request).toHaveBeenCalledWith(
+      '/api/mod-programas-estudio/docentes/10/carga-lectiva?programa_id=5',
+      expect.objectContaining({ cache: 'no-store' }),
+    );
+    expect(apiClient.request.mock.calls.some(([ruta]) => ruta.includes('/malla'))).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sílabos y Plan de Trabajo' }));
+    expect(await screen.findByText('Desarrollo de Sistemas de Información')).toBeVisible();
+    expect(await screen.findByText(/No tienes carga lectiva asignada/)).toBeVisible();
+    expect(screen.queryByText('Contabilidad')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Ver Documento' })).not.toBeInTheDocument();
+  });
+
+  it('limita las unidades a la carga del programa asignado y del periodo seleccionado', async () => {
+    apiClient.request.mockImplementation(async (endpoint) => {
+      if (endpoint.endsWith('/programas')) return [{ id: 2, nombre: 'Contabilidad' }, { id: 1, nombre: 'Sistemas' }];
+      if (endpoint.endsWith('/periodos')) return [{ id: 1, codigo: '2026-I', estado: 'en_curso' }, { id: 2, codigo: '2025-II', estado: 'historico' }];
+      if (endpoint.includes('/carga-lectiva')) return [
+        { programa_id: 2, periodo_id: 1, unidad_didactica_id: 103 },
+        { programa_id: 1, periodo_id: 2, unidad_didactica_id: 102 },
+        { programa_id: 1, periodo_id: 1, unidad_didactica_id: 101 },
+      ];
+      if (endpoint.endsWith('/malla')) return [{ id: 10, unidades: [
+        { id: 101, nombre: 'Unidad del periodo' },
+        { id: 102, nombre: 'Unidad de otro periodo' },
+        { id: 103, nombre: 'Unidad de otro programa' },
+      ] }];
+      return [];
+    });
+
+    render(<EvaluationDashboard />);
+    expect(await screen.findByRole('option', { name: 'Unidad del periodo' })).toBeVisible();
+    expect(screen.getByText('2026-I')).toBeVisible();
+    expect(screen.queryByRole('option', { name: 'Unidad de otro periodo' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Unidad de otro programa' })).not.toBeInTheDocument();
+  });
+
+  it('distingue un error de carga lectiva de la ausencia de asignaciones', async () => {
+    apiClient.request.mockImplementation(async (endpoint) => {
+      if (endpoint.endsWith('/programas')) return [{ id: 1, nombre: 'Sistemas' }];
+      if (endpoint.endsWith('/periodos')) return [{ id: 1, codigo: '2026-I', estado: 'en_curso' }];
+      throw new Error('Servicio no disponible');
+    });
+    render(<EvaluationDashboard />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('No se pudo consultar tu carga lectiva');
+    expect(screen.getByText('Sistemas')).toBeVisible();
+    expect(screen.queryByText(/No tienes unidades didácticas asignadas/)).not.toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toBeDisabled();
+  });
+
+  it('indica si falta el programa del perfil y evita consultar mallas o cargas', async () => {
+    usuario.programa_id = null;
+    apiClient.request.mockImplementation(async (endpoint) => endpoint.endsWith('/programas')
+      ? [{ id: 1, nombre: 'Contabilidad' }] : [{ id: 1, codigo: '2026-I' }]);
+    render(<EvaluationDashboard />);
+    expect(await screen.findByText('Sin programa asignado')).toBeVisible();
+    expect(screen.queryByText('Contabilidad')).not.toBeInTheDocument();
+    expect(apiClient.request.mock.calls.some(([ruta]) => /carga-lectiva|\/malla/.test(ruta))).toBe(false);
   });
 
   it('bloquea la matrícula pendiente y guarda el promedio solo cuando la nómina la devuelve confirmada', async () => {
@@ -32,7 +108,7 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
     apiClient.request.mockImplementation(async (endpoint, options) => {
       if (endpoint.endsWith('/programas')) return [{ id: 1, nombre: 'DSI' }];
       if (endpoint.endsWith('/periodos')) return [{ id: 1, codigo: '2026-I' }];
-      if (endpoint.endsWith('/carga-lectiva')) return [{ id: 1, programa_id: 1, periodo_id: 1, unidad_didactica_id: 101 }];
+      if (endpoint.includes('/carga-lectiva')) return [{ id: 1, programa_id: 1, periodo_id: 1, unidad_didactica_id: 101 }];
       if (endpoint.endsWith('/malla')) return [{ id: 1, periodo: 1, unidades: [{ id: 101, nombre: 'Lenguaje de programación' }] }];
       if (endpoint.includes('/matriculas/unidad/')) {
         return [{ id: 100, matricula_detalle_id: 80, estado_matricula: estadoMatricula, estado_curso: 'cursando',
@@ -71,13 +147,14 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
   });
 
   it('verifica el historial cuando la nómina antigua omite los estados y bloquea coincidencias ambiguas', async () => {
+    usuario.programa_id = 5;
     const confirmado = { periodo_id: 6, estado_matricula: 'confirmada',
       unidades: [{ unidad_didactica_id: 184, estado_curso: 'cursando' }] };
     const guardados = [];
     apiClient.request.mockImplementation(async (endpoint, options) => {
       if (endpoint.endsWith('/programas')) return [{ id: 5, nombre: 'DSI' }];
       if (endpoint.endsWith('/periodos')) return [{ id: 6, codigo: '2026-I' }];
-      if (endpoint.endsWith('/carga-lectiva')) return [{ id: 12, programa_id: 5, periodo_id: 6, unidad_didactica_id: 184 }];
+      if (endpoint.includes('/carga-lectiva')) return [{ id: 12, programa_id: 5, periodo_id: 6, unidad_didactica_id: 184 }];
       if (endpoint.endsWith('/malla')) return [{ id: 1, periodo: 1, unidades: [{ id: 184, nombre: 'Lenguaje de programación' }] }];
       if (endpoint.includes('/matriculas/unidad/')) return [
         { id: 100, matricula_detalle_id: 15, nombres: 'Alumno', apellidos: 'Verificado' },
@@ -122,10 +199,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
 
   it('1. Debe renderizar la lista de estudiantes con notas cuando la API responde exitosamente', async () => {
     apiClient.request.mockImplementation((endpoint) => {
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'Desarrollo de Sistemas de Información' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -185,10 +262,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
 
   it('3. Una nota fuera de rango (ej. 25 o -1) no actualiza el estado y no envía la petición a la API', async () => {
     apiClient.request.mockImplementation((endpoint) => {
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'DSI' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -246,10 +323,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
   it('4. [BUG-D10] Debe mostrar un mensaje de error visual cuando se ingresa una nota fuera de rango', async () => {
     // BUG-D10: EvaluationDashboard actualmente ignora en silencio las notas inválidas sin mostrar ningún mensaje de advertencia o feedback al usuario
     apiClient.request.mockImplementation((endpoint) => {
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'DSI' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -286,10 +363,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
 
   it('5. DocentePlanning se renderiza y muestra opciones de subida de sílabos y planes', async () => {
     apiClient.request.mockImplementation((endpoint) => {
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'DSI' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -304,7 +381,7 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
       }
       if (endpoint.includes('/planes-trabajo')) {
         return Promise.resolve([
-          { id: 1, estado: 'aprobado', archivo_url: '/docs/plan.pdf' }
+          { id: 1, programa_id: 1, estado: 'aprobado', archivo_url: '/docs/plan.pdf' }
         ]);
       }
       if (endpoint.includes('/silabos')) {
@@ -346,10 +423,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
     const fechaLimiteEsp = `${d}/${m}/${y}`;
 
     apiClient.request.mockImplementation((endpoint) => {
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'DSI' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -394,10 +471,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
 
   it('8. [PASO 1] Banner de acta cerrada con motivo de bloqueo e inputs en read-only / deshabilitados', async () => {
     apiClient.request.mockImplementation((endpoint) => {
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'DSI' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -449,10 +526,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
 
   it('9. [PASO 1] Unidad sin carga muestra mensaje "Esta unidad no tiene docente asignado..." en read-only', async () => {
     apiClient.request.mockImplementation((endpoint) => {
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'DSI' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -496,10 +573,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
 
   it('10. [PASO 2] Error 409 al guardar muestra el detail del backend y no pierde notas ingresadas', async () => {
     apiClient.request.mockImplementation((endpoint, options) => {
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'DSI' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -565,10 +642,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
 
   it('11. [PASO 3] Botón "Vista previa del acta" y modal con marca de agua cuando no está cerrada', async () => {
     apiClient.request.mockImplementation((endpoint) => {
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'DSI' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -616,10 +693,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
 
   it('12. [PASO 3] Botón "Acta oficial" y modal oficial con fecha/hora de cierre en Lima cuando está cerrada', async () => {
     apiClient.request.mockImplementation((endpoint) => {
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'DSI' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -678,10 +755,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
           archivo_url: '/docs/silabos/mi_silabo.pdf'
         });
       }
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'DSI' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I', estado: 'abierto' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -749,10 +826,10 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
           archivo_url: '/docs/planes/plan_anual.pdf'
         });
       }
-      if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
+      if (endpoint.endsWith('/programas')) {
         return Promise.resolve([{ id: 1, nombre: 'DSI' }]);
       }
-      if (endpoint.includes('/programas-estudio/periodos')) {
+      if (endpoint.endsWith('/periodos')) {
         return Promise.resolve([{ id: 1, codigo: '2026-I', estado: 'abierto' }]);
       }
       if (endpoint.includes('/carga-lectiva')) {
@@ -780,7 +857,7 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
       </ToastProvider>
     );
     const subirPlanBtn = await screen.findByRole('button', { name: /Subir Plan de Trabajo/i });
-    expect(subirPlanBtn).toBeInTheDocument();
+    await waitFor(() => expect(subirPlanBtn).toBeEnabled());
 
     fireEvent.click(subirPlanBtn);
 

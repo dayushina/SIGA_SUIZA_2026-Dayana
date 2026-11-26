@@ -65,6 +65,7 @@ class HTTPGateway:
             or (module_name == "mod-evaluacion" and ruta.startswith(("registros/unidad/", "actas/unidad/")))
             or (module_name == "mod-programas-estudio" and (
                 ruta.endswith("/docentes-disponibles")
+                or (ruta.startswith(("docente/", "docentes/")) and ruta.endswith("/carga-lectiva"))
                 or ruta == "periodos"
                 or ruta.startswith("periodos/")
                 or (ruta == "programas" and "implementados" in request.query_params)

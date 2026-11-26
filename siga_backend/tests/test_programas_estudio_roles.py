@@ -294,6 +294,19 @@ async def test_acceso_endpoints_docente(client_prog, fix_entorno_programas):
     assert r4.status_code == 200
     r5 = await client_prog.get(f"/docente/{doc_a}/carga-lectiva", headers=auth_headers(doc_a))
     assert r5.status_code == 200
+    assert r5.json() == r4.json()
+    assert r4.headers["cache-control"] == r5.headers["cache-control"] == "no-store"
+
+    programa_1 = env["programa_1"]
+    programa_2 = env["programa_2"]
+    ruta = f"/docentes/{doc_a}/carga-lectiva"
+    carga_programa = await client_prog.get(ruta, params={"programa_id": programa_1, "periodo_id": p_id}, headers=auth_headers(doc_a))
+    assert carga_programa.status_code == 200
+    assert carga_programa.json()
+    assert all(c["programa_id"] == programa_1 and c["periodo_id"] == p_id for c in carga_programa.json())
+    otro_programa = await client_prog.get(ruta, params={"programa_id": programa_2}, headers=auth_headers(doc_a))
+    assert otro_programa.status_code == 200
+    assert otro_programa.json() == []
 
     # 2. Docente B intenta acceder a los datos de Docente A (403)
     r_bad1 = await client_prog.get(f"/docente/{doc_a}/carga-lectiva?periodo_id={p_id}", headers=auth_headers(doc_b))

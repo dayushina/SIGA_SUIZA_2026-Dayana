@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { apiClient } from '../../core/api/client';
 import { useToast } from '../../core/ui/ToastContext';
 import { DocentePlanning } from '../academic/DocentePlanning';
+import { useDocenteContexto } from '../academic/useDocenteContexto';
 import { useAuth } from '../../core/auth/useAuth';
 import { Save, GraduationCap, Calendar, BookOpen, ClipboardList, AlertTriangle, Target, FileText, Printer, X, CheckCircle2 } from 'lucide-react';
 
@@ -191,8 +192,10 @@ function useSafeToast() {
 
 export function EvaluationDashboard() {
   const { user } = useAuth();
-  const userRole = user?.role || (Array.isArray(user?.roles) ? user.roles[0]?.name || user.roles[0] : '');
-  const isAdmin = Boolean(user?.is_superuser || userRole === 'admin' || userRole === 'superadmin');
+  const {
+    isAdmin, programs, periods, selectedProgram, setSelectedProgram, selectedPeriod, setSelectedPeriod,
+    cargasDelPeriodo, programaAsignado, cargandoContexto, errorContexto, errorCarga,
+  } = useDocenteContexto(user);
   const { toast } = useSafeToast();
 
   const [activeTab, setActiveTab] = useState('notas'); // 'notas', 'planificacion'
@@ -204,68 +207,41 @@ export function EvaluationDashboard() {
   const [saveError, setSaveError] = useState(null);
   const [actaStatus, setActaStatus] = useState(null);
 
-  const [programs, setPrograms] = useState([]);
-  const [periods, setPeriods] = useState([]);
-  const [malla, setMalla] = useState([]);
-  const [teacherLoad, setTeacherLoad] = useState([]);
-
-  const [selectedProgram, setSelectedProgram] = useState('');
-  const [selectedPeriod, setSelectedPeriod] = useState('');
+  const [mallaConsultada, setMallaConsultada] = useState(null);
   const [selectedUnit, setSelectedUnit] = useState('');
-
   const [students, setStudents] = useState([]);
 
-  // Cargar Programas, Periodos y Carga del Docente al iniciar
-  useEffect(() => {
-    const fetchInitialData = async () => {
-      try {
-        const [progRes, perRes, loadRes] = await Promise.all([
-          apiClient.request('/api/mod-programas-estudio/programas'),
-          apiClient.request('/api/mod-programas-estudio/periodos'),
-          user?.id ? apiClient.request(`/api/mod-programas-estudio/docentes/${user.id}/carga-lectiva`).catch(() => []) : Promise.resolve([])
-        ]);
-        setPrograms(progRes || []);
-        setPeriods(perRes || []);
-        setTeacherLoad(loadRes || []);
+  const tieneCarga = cargasDelPeriodo.length > 0;
+  const consultaMalla = Boolean(selectedProgram && selectedPeriod && (isAdmin || tieneCarga));
 
-        if (loadRes && loadRes.length > 0) {
-          setSelectedProgram(loadRes[0].programa_id.toString());
-          setSelectedPeriod(loadRes[0].periodo_id.toString());
-        } else {
-          if (progRes && progRes.length > 0) {
-            setSelectedProgram(progRes[0].id.toString());
-          }
-          if (perRes && perRes.length > 0) {
-            const active = perRes.find(p => ['ACTIVO', 'activo', 'matricula_abierta', 'en_curso'].includes(p.estado)) || perRes[perRes.length - 1];
-            setSelectedPeriod(active.id.toString());
-          }
-        }
-      } catch (e) {
-        console.error('Error fetching initial data', e);
-      }
-    };
-    if (user) {
-      fetchInitialData();
-    }
-  }, [user]);
-
-  // Cargar Malla cuando se selecciona un Programa
   useEffect(() => {
-    if (!selectedProgram) {
-      setMalla([]);
-      setSelectedUnit('');
-      return;
-    }
+    setSelectedUnit('');
+    setMallaConsultada(null);
+    if (!consultaMalla) return;
+    const controller = new AbortController();
     const fetchMalla = async () => {
       try {
-        const res = await apiClient.request(`/api/mod-programas-estudio/programas/${selectedProgram}/malla`);
-        setMalla(res || []);
-      } catch (e) {
-        console.error('Error fetching malla', e);
+        const res = await apiClient.request(`/api/mod-programas-estudio/programas/${selectedProgram}/malla`, {
+          signal: controller.signal, cache: 'no-store',
+        });
+        if (!Array.isArray(res)) throw new Error('Respuesta incompleta');
+        if (!controller.signal.aborted) setMallaConsultada({ programa: selectedProgram, periodo: selectedPeriod, modulos: res });
+      } catch {
+        if (!controller.signal.aborted) setMallaConsultada({ programa: selectedProgram, periodo: selectedPeriod, error: true });
       }
     };
     fetchMalla();
-  }, [selectedProgram]);
+    return () => controller.abort();
+  }, [consultaMalla, selectedProgram, selectedPeriod]);
+
+  const mallaDelContexto = mallaConsultada?.programa === selectedProgram && mallaConsultada.periodo === selectedPeriod
+    ? mallaConsultada : null;
+  const unidadesAsignadas = new Set(cargasDelPeriodo.map(c => String(c.unidad_didactica_id)));
+  const malla = (mallaDelContexto?.modulos ?? []).map(m => ({
+    ...m,
+    unidades: (m.unidades ?? []).filter(u => isAdmin || unidadesAsignadas.has(String(u.id))),
+  })).filter(m => m.unidades.length > 0);
+  const unidadSeleccionada = malla.some(m => m.unidades.some(u => String(u.id) === selectedUnit)) ? selectedUnit : '';
 
   // Cargar Estudiantes matriculados, notas y estado del acta cuando se selecciona la Unidad y el Periodo
   useEffect(() => {
@@ -275,7 +251,7 @@ export function EvaluationDashboard() {
     setStudents([]);
     setActaStatus(null);
 
-    if (!selectedUnit || !selectedPeriod) {
+    if (!unidadSeleccionada || !selectedPeriod) {
       setLoading(false);
       return;
     }
@@ -286,9 +262,9 @@ export function EvaluationDashboard() {
       setLoading(true);
       try {
         const [enrolled, grades, actaInfo] = await Promise.all([
-          apiClient.request(`/api/mod-gestion-academica/matriculas/unidad/${selectedUnit}/periodo/${selectedPeriod}`, opciones),
-          apiClient.request(`/api/mod-evaluacion/registros/unidad/${selectedUnit}/periodo/${selectedPeriod}`, opciones),
-          apiClient.request(`/api/mod-evaluacion/actas/unidad/${selectedUnit}/periodo/${selectedPeriod}`, opciones),
+          apiClient.request(`/api/mod-gestion-academica/matriculas/unidad/${unidadSeleccionada}/periodo/${selectedPeriod}`, opciones),
+          apiClient.request(`/api/mod-evaluacion/registros/unidad/${unidadSeleccionada}/periodo/${selectedPeriod}`, opciones),
+          apiClient.request(`/api/mod-evaluacion/actas/unidad/${unidadSeleccionada}/periodo/${selectedPeriod}`, opciones),
         ]);
         if (controller.signal.aborted) return;
 
@@ -301,7 +277,7 @@ export function EvaluationDashboard() {
         if (!Array.isArray(enrolled) || !Array.isArray(grades)) throw new Error('Respuesta de la nómina incompleta.');
         const gradesByDetail = new Map(grades.map(g => [g.matricula_detalle_id, g]));
 
-        const nomina = await completarEstadosDeNomina(enrolled, Number(selectedUnit), Number(selectedPeriod), opciones);
+        const nomina = await completarEstadosDeNomina(enrolled, Number(unidadSeleccionada), Number(selectedPeriod), opciones);
         if (controller.signal.aborted) return;
         const combined = nomina.map(est => {
           const gradeRecord = gradesByDetail.get(est.matricula_detalle_id);
@@ -331,7 +307,7 @@ export function EvaluationDashboard() {
 
     fetchStudentsAndGrades();
     return () => controller.abort();
-  }, [selectedUnit, selectedPeriod]);
+  }, [unidadSeleccionada, selectedPeriod]);
 
   const isReadOnly = Boolean(
     actaStatus && (!actaStatus.tiene_carga || !actaStatus.editable)
@@ -341,7 +317,7 @@ export function EvaluationDashboard() {
   const cambios = actaStudents.filter(s => !motivoPromedioBloqueado(s) && notaNumerica(s.nota_final) !== s.nota_guardada);
   const hayMatriculasPendientes = students.some(s => s.estado_matricula === 'pendiente');
   const hayEstadosSinVerificar = students.some(s => !tieneEstadosDeMatricula(s));
-  const puedeGuardar = Boolean(selectedUnit && selectedPeriod && !loading && !saving && !isReadOnly && cambios.length);
+  const puedeGuardar = Boolean(unidadSeleccionada && selectedPeriod && !loading && !saving && !isReadOnly && cambios.length);
 
   const handleGradeChange = (student, value) => {
     if (isReadOnly || saving || motivoPromedioBloqueado(student)) return;
@@ -402,7 +378,7 @@ export function EvaluationDashboard() {
               ...payload,
               matricula_detalle_id: student.matricula_detalle_id,
               estudiante_id: student.id,
-              unidad_didactica_id: parseInt(selectedUnit, 10),
+              unidad_didactica_id: parseInt(unidadSeleccionada, 10),
               periodo_id: parseInt(selectedPeriod, 10)
             })
           });
@@ -441,7 +417,7 @@ export function EvaluationDashboard() {
     return isEmpleabilidad ? 'Transversal / Empleabilidad' : 'Específica / Técnica';
   };
 
-  const selectedUnitData = malla.flatMap(m => m.unidades.map(u => ({ ...u, moduloNombre: m.nombre }))).find(u => u.id === parseInt(selectedUnit));
+  const selectedUnitData = malla.flatMap(m => m.unidades.map(u => ({ ...u, moduloNombre: m.nombre }))).find(u => String(u.id) === unidadSeleccionada);
   const tipoCompetencia = selectedUnitData ? getTipoCompetencia(selectedUnitData.nombre, selectedUnitData.moduloNombre) : '';
 
   const numberToWords = (num) => {
@@ -491,9 +467,9 @@ export function EvaluationDashboard() {
           <button 
             type="button"
             onClick={() => setShowActaModal(true)}
-            disabled={!selectedUnit || actaStudents.length === 0}
+            disabled={!unidadSeleccionada || actaStudents.length === 0}
             className={`inline-flex items-center gap-1.5 py-2 px-3.5 rounded-xl font-medium text-xs border transition-all ${
-              !selectedUnit || actaStudents.length === 0
+              !unidadSeleccionada || actaStudents.length === 0
                 ? 'border-slate-200 text-slate-300 bg-slate-50 cursor-not-allowed' 
                 : 'border-slate-200/90 text-slate-700 bg-white hover:bg-slate-50 shadow-sm cursor-pointer'
             }`}
@@ -579,7 +555,8 @@ export function EvaluationDashboard() {
                     </select>
                   ) : (
                     <span className="text-xs font-bold text-slate-900">
-                      {programs.find(p => p.id.toString() === selectedProgram)?.nombre || 'Seleccione un programa'}
+                      {programs.find(p => String(p.id) === selectedProgram)?.nombre
+                        || (cargandoContexto ? 'Cargando…' : programaAsignado ? 'Programa no disponible' : 'Sin programa asignado')}
                     </span>
                   )}
                 </div>
@@ -604,7 +581,8 @@ export function EvaluationDashboard() {
                     </select>
                   ) : (
                     <span className="text-xs font-bold text-slate-900 font-mono">
-                      {periods.find(p => p.id.toString() === selectedPeriod)?.codigo || 'Cargando...'}
+                      {periods.find(p => String(p.id) === selectedPeriod)?.codigo
+                        || (cargandoContexto ? 'Cargando…' : 'Sin periodo disponible')}
                     </span>
                   )}
                 </div>
@@ -620,31 +598,20 @@ export function EvaluationDashboard() {
               <div className="relative">
                 <select 
                   className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all appearance-none cursor-pointer"
-                  value={selectedUnit}
+                  value={unidadSeleccionada}
                   onChange={(e) => setSelectedUnit(e.target.value)}
                   disabled={saving || !selectedProgram || !selectedPeriod || malla.length === 0}
                 >
                   <option value="" className="text-slate-400">-- Seleccione el curso a evaluar --</option>
-                  {malla.map(modulo => {
-                    const hasLoad = teacherLoad.some(t => t.periodo_id === parseInt(selectedPeriod));
-                    const assignedUnits = (isAdmin || !hasLoad)
-                      ? modulo.unidades
-                      : modulo.unidades.filter(u => 
-                          teacherLoad.some(t => t.unidad_didactica_id === u.id && t.periodo_id === parseInt(selectedPeriod))
-                        );
-
-                    if (assignedUnits.length === 0) return null;
-
-                    return (
+                  {malla.map(modulo => (
                       <optgroup key={`mod-${modulo.id}`} label={`Ciclo ${modulo.periodo} - ${modulo.nombre}`} className="bg-slate-50 font-bold text-slate-500 text-xs">
-                        {assignedUnits.map(u => (
+                        {modulo.unidades.map(u => (
                           <option key={u.id} value={u.id} className="font-medium text-slate-800 text-xs">
                             {u.nombre}
                           </option>
                         ))}
                       </optgroup>
-                    );
-                  })}
+                  ))}
                 </select>
                 <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3.5 text-slate-400">
                   <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
@@ -653,17 +620,22 @@ export function EvaluationDashboard() {
                 </div>
               </div>
 
-              {teacherLoad.length === 0 && (
+              {(errorContexto || (!isAdmin && errorCarga) || mallaDelContexto?.error) && (
+                <p role="alert" className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
+                  {errorContexto || errorCarga || 'No se pudo cargar la malla del programa. Vuelve a abrir el Panel Docente.'}
+                </p>
+              )}
+              {!cargandoContexto && !isAdmin && !errorContexto && !errorCarga && selectedProgram && selectedPeriod && !tieneCarga && (
                 <div className="mt-3 flex items-center gap-2 p-3 bg-amber-50/70 border border-amber-200/70 rounded-xl text-xs text-amber-800">
                   <AlertTriangle size={15} className="text-amber-600 flex-shrink-0" />
-                  <span>No tienes unidades didácticas asignadas en tu carga lectiva para este periodo.</span>
+                  <span>No tienes unidades didácticas asignadas en este programa y periodo. La Coordinación de Programa puede asignarlas desde Carga Lectiva.</span>
                 </div>
               )}
             </div>
           </div>
 
           {/* Banners Informativos del Estado del Acta */}
-          {selectedUnit && selectedPeriod && actaStatus && (
+          {unidadSeleccionada && selectedPeriod && actaStatus && (
             <div className="space-y-3">
               {/* 1. Unidad sin docente asignado en carga_lectiva */}
               {!actaStatus.tiene_carga && (
@@ -725,7 +697,7 @@ export function EvaluationDashboard() {
           )}
 
           {/* Tabla de Registro de Promedios */}
-          {selectedUnit && selectedPeriod && (
+          {unidadSeleccionada && selectedPeriod && (
             <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden animate-fade-in">
               {/* Notificación de Éxito al Guardar */}
               {saveSuccess && (
