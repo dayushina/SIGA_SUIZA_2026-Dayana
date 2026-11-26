@@ -70,6 +70,56 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
     expect(guardar).toBeDisabled();
   });
 
+  it('verifica el historial cuando la nómina antigua omite los estados y bloquea coincidencias ambiguas', async () => {
+    const confirmado = { periodo_id: 6, estado_matricula: 'confirmada',
+      unidades: [{ unidad_didactica_id: 184, estado_curso: 'cursando' }] };
+    const guardados = [];
+    apiClient.request.mockImplementation(async (endpoint, options) => {
+      if (endpoint.endsWith('/programas')) return [{ id: 5, nombre: 'DSI' }];
+      if (endpoint.endsWith('/periodos')) return [{ id: 6, codigo: '2026-I' }];
+      if (endpoint.endsWith('/carga-lectiva')) return [{ id: 12, programa_id: 5, periodo_id: 6, unidad_didactica_id: 184 }];
+      if (endpoint.endsWith('/malla')) return [{ id: 1, periodo: 1, unidades: [{ id: 184, nombre: 'Lenguaje de programación' }] }];
+      if (endpoint.includes('/matriculas/unidad/')) return [
+        { id: 100, matricula_detalle_id: 15, nombres: 'Alumno', apellidos: 'Verificado' },
+        { id: 101, matricula_detalle_id: 16, nombres: 'Alumno', apellidos: 'Ambiguo' },
+        { id: 102, matricula_detalle_id: 17, nombres: 'Alumno', apellidos: 'Retirado' },
+      ];
+      if (endpoint.endsWith('/100/historial')) return { estudiante_id: 100, matriculas: [
+        { ...confirmado, periodo_id: 7 }, { ...confirmado, estado_matricula: 'anulada' }, confirmado,
+      ] };
+      if (endpoint.endsWith('/101/historial')) return { estudiante_id: 101, matriculas: [
+        confirmado, { ...confirmado, estado_matricula: 'pendiente' },
+      ] };
+      if (endpoint.endsWith('/102/historial')) return { estudiante_id: 102, matriculas: [{
+        ...confirmado, unidades: [
+          { ...confirmado.unidades[0], matricula_detalle_id: 17, estado_curso: 'retirado' },
+          { ...confirmado.unidades[0], matricula_detalle_id: 18 },
+        ],
+      }] };
+      if (endpoint.includes('/actas/unidad/')) return { tiene_carga: true, editable: true };
+      if (endpoint.endsWith('/registros') && options?.method === 'POST') {
+        const payload = JSON.parse(options.body);
+        guardados.push(payload);
+        return { id: 241, ...payload, estado: 'aprobado' };
+      }
+      return [];
+    });
+    render(<EvaluationDashboard />);
+    await screen.findByText('Lenguaje de programación');
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: '184' } });
+
+    const nota = await screen.findByRole('textbox', { name: 'Promedio final de Verificado, Alumno' });
+    expect(nota).toBeEnabled();
+    expect(screen.getByRole('textbox', { name: 'Promedio final de Ambiguo, Alumno' })).toBeDisabled();
+    expect(screen.getByRole('textbox', { name: 'Promedio final de Retirado, Alumno' })).toBeDisabled();
+    expect(screen.getByText('Estado de matrícula no disponible')).toBeVisible();
+    expect(screen.getByText('Retirado de la unidad')).toBeVisible();
+    fireEvent.change(nota, { target: { value: '20' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar Promedios' }));
+    expect(await screen.findByTestId('save-success-alert')).toBeVisible();
+    expect(guardados).toEqual([{ nota_final: 20, estudiante_id: 100, matricula_detalle_id: 15, unidad_didactica_id: 184, periodo_id: 6 }]);
+  });
+
   it('1. Debe renderizar la lista de estudiantes con notas cuando la API responde exitosamente', async () => {
     apiClient.request.mockImplementation((endpoint) => {
       if (endpoint.includes('/programas-estudio/programas') && !endpoint.includes('/malla')) {
@@ -88,8 +138,8 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
       }
       if (endpoint.includes('/matriculas/unidad/101/periodo/1')) {
         return Promise.resolve([
-          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', nombres: 'Estudiante', apellidos: 'Prueba SIGA' },
-          { id: 101, matricula_detalle_id: 81, estado_matricula: 'confirmada', nombres: 'Ana María', apellidos: 'Gómez Perez' }
+          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', estado_curso: 'cursando', nombres: 'Estudiante', apellidos: 'Prueba SIGA' },
+          { id: 101, matricula_detalle_id: 81, estado_matricula: 'confirmada', estado_curso: 'cursando', nombres: 'Ana María', apellidos: 'Gómez Perez' }
         ]);
       }
       if (endpoint.includes('/registros/unidad/101/periodo/1')) {
@@ -151,7 +201,7 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
       }
       if (endpoint.includes('/matriculas/unidad/101/periodo/1')) {
         return Promise.resolve([
-          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', nombres: 'Luis', apellidos: 'Ruiz' }
+          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', estado_curso: 'cursando', nombres: 'Luis', apellidos: 'Ruiz' }
         ]);
       }
       if (endpoint.includes('/registros/unidad/101/periodo/1')) {
@@ -212,7 +262,7 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
       }
       if (endpoint.includes('/matriculas/unidad/101/periodo/1')) {
         return Promise.resolve([
-          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', nombres: 'Luis', apellidos: 'Ruiz' }
+          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', estado_curso: 'cursando', nombres: 'Luis', apellidos: 'Ruiz' }
         ]);
       }
       return Promise.resolve([]);
@@ -312,7 +362,7 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
       }
       if (endpoint.includes('/matriculas/unidad/101/periodo/1')) {
         return Promise.resolve([
-          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', nombres: 'Estudiante', apellidos: 'Uno' }
+          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', estado_curso: 'cursando', nombres: 'Estudiante', apellidos: 'Uno' }
         ]);
       }
       if (endpoint.includes('/actas/unidad/101/periodo/1')) {
@@ -360,7 +410,7 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
       }
       if (endpoint.includes('/matriculas/unidad/101/periodo/1')) {
         return Promise.resolve([
-          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', nombres: 'Estudiante', apellidos: 'Uno' }
+          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', estado_curso: 'cursando', nombres: 'Estudiante', apellidos: 'Uno' }
         ]);
       }
       if (endpoint.includes('/actas/unidad/101/periodo/1')) {
@@ -415,7 +465,7 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
       }
       if (endpoint.includes('/matriculas/unidad/101/periodo/1')) {
         return Promise.resolve([
-          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', nombres: 'Estudiante', apellidos: 'Uno' }
+          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', estado_curso: 'cursando', nombres: 'Estudiante', apellidos: 'Uno' }
         ]);
       }
       if (endpoint.includes('/actas/unidad/101/periodo/1')) {
@@ -462,7 +512,7 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
       }
       if (endpoint.includes('/matriculas/unidad/101/periodo/1')) {
         return Promise.resolve([
-          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', nombres: 'Estudiante', apellidos: 'Uno' }
+          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', estado_curso: 'cursando', nombres: 'Estudiante', apellidos: 'Uno' }
         ]);
       }
       if (endpoint.includes('/actas/unidad/101/periodo/1')) {
@@ -531,7 +581,7 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
       }
       if (endpoint.includes('/matriculas/unidad/101/periodo/1')) {
         return Promise.resolve([
-          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', nombres: 'Estudiante', apellidos: 'Uno' }
+          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', estado_curso: 'cursando', nombres: 'Estudiante', apellidos: 'Uno' }
         ]);
       }
       if (endpoint.includes('/actas/unidad/101/periodo/1')) {
@@ -582,7 +632,7 @@ describe('Auditoría Frontend - Rol Docente (EvaluationDashboard & DocentePlanni
       }
       if (endpoint.includes('/matriculas/unidad/101/periodo/1')) {
         return Promise.resolve([
-          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', nombres: 'Estudiante', apellidos: 'Uno' }
+          { id: 100, matricula_detalle_id: 80, estado_matricula: 'confirmada', estado_curso: 'cursando', nombres: 'Estudiante', apellidos: 'Uno' }
         ]);
       }
       if (endpoint.includes('/actas/unidad/101/periodo/1')) {

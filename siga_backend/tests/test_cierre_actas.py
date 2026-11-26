@@ -458,6 +458,14 @@ async def test_nomina_y_guardado_reflejan_confirmacion_de_matricula(
         resultado = await a.post("/matriculas/888/consolidar")
         assert resultado.status_code == 200, resultado.text
         assert {e["matricula_detalle_id"]: e["estado_matricula"] for e in (await a.get(ruta_nomina)).json()}[8881] == "confirmada"
+        historial = await a.get("/estudiantes/100/historial")
+        assert historial.status_code == 200, historial.text
+        assert historial.headers["cache-control"] == "no-store"
+        matricula = next(m for m in historial.json()["matriculas"] if m["id"] == 888)
+        assert matricula["estado_matricula"] == "confirmada"
+        assert matricula["unidades"] == [
+            {"matricula_detalle_id": 8881, "unidad_didactica_id": u_id, "creditos": 4, "estado_curso": "cursando"}
+        ]
 
     r = await client_evaluacion.post("/registros", json={**payload, "nota_final": 20})
     assert r.status_code == 201 and r.json()["nota_final"] == 20, r.text

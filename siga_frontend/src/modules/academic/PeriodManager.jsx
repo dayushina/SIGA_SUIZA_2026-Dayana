@@ -1,10 +1,23 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { apiClient } from '../../core/api/client';
 import { useAuth } from '../../core/auth/useAuth';
 import { tieneRol } from '../../core/auth/roles';
 import { useConfirm } from '../../core/ui/ConfirmModal';
 import { useToast } from '../../core/ui/ToastContext';
-import { X, Calendar, Plus, Clock, Trash2, Loader2 } from 'lucide-react';
+import { X, Calendar, Plus, Clock, Trash2, Loader2, Pencil, Save } from 'lucide-react';
+
+const EMPTY_PERIOD = {
+  codigo: '',
+  fecha_inicio: '',
+  fecha_fin: '',
+  fecha_fin_matricula_regular: '',
+  fecha_fin_matricula_extemporanea: '',
+  estado: 'planificacion',
+};
+const EDITABLE_STATES = new Set(['planificacion', 'matricula_abierta', 'en_curso']);
+const canEditStatus = (period) => EDITABLE_STATES.has(period?.estado?.trim().toLowerCase());
+const inputDate = (value) => value?.slice(0, 10) ?? '';
+const displayDate = (value) => value ? new Date(`${inputDate(value)}T00:00:00`).toLocaleDateString('es-PE') : '—';
 
 export function PeriodManager({ onClose, onUpdate }) {
   const { user } = useAuth();
@@ -16,16 +29,22 @@ export function PeriodManager({ onClose, onUpdate }) {
   const [changingStatus, setChangingStatus] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
   const [deleteError, setDeleteError] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [editError, setEditError] = useState('');
+  const codeInput = useRef(null);
+  const editTrigger = useRef(null);
   const busy = loading || isSubmitting || changingStatus || deletingId !== null;
   const canDelete = tieneRol(user);
-  const [newPeriod, setNewPeriod] = useState({
-    codigo: '',
-    fecha_inicio: '',
-    fecha_fin: '',
-    fecha_fin_matricula_regular: '',
-    fecha_fin_matricula_extemporanea: '',
-    estado: 'planificacion'
-  });
+  const canEdit = tieneRol(user, 'secretaria_academica');
+  const [newPeriod, setNewPeriod] = useState(EMPTY_PERIOD);
+  const editId = editing?.period.id;
+  const form = editing?.data ?? newPeriod;
+  const editable = canEdit && canEditStatus(periods.find(p => p.id === editId));
+
+  useEffect(() => {
+    if (editId !== undefined) codeInput.current?.focus();
+    else editTrigger.current?.focus();
+  }, [editId]);
 
   const fetchPeriods = async () => {
     setLoading(true);
@@ -43,19 +62,55 @@ export function PeriodManager({ onClose, onUpdate }) {
     fetchPeriods();
   }, []);
 
-  const handleCreate = async (e) => {
+  const updateField = (name, value) => {
+    if (editing) {
+      const original = editing.period[name];
+      const nextValue = name.startsWith('fecha_') && value === inputDate(original) ? original ?? '' : value;
+      setEditing({ ...editing, data: { ...editing.data, [name]: nextValue } });
+    } else {
+      setNewPeriod({ ...newPeriod, [name]: value });
+    }
+  };
+
+  const startEditing = (period, trigger) => {
+    const { codigo, fecha_inicio, fecha_fin, fecha_fin_matricula_regular, fecha_fin_matricula_extemporanea } = period;
+    editTrigger.current = trigger;
+    setEditError('');
+    setEditing({ period, data: { codigo, fecha_inicio, fecha_fin, fecha_fin_matricula_regular, fecha_fin_matricula_extemporanea } });
+  };
+
+  const handleSave = async (e) => {
     e.preventDefault();
-    if (busy) return;
+    if (busy || (editing && !editable)) return;
     setIsSubmitting(true);
+    setEditError('');
     try {
-      await apiClient.callModule('mod-programas-estudio', 'periodos', 'POST', newPeriod);
-      setNewPeriod({ codigo: '', fecha_inicio: '', fecha_fin: '', fecha_fin_matricula_regular: '', fecha_fin_matricula_extemporanea: '', estado: 'planificacion' });
-      await fetchPeriods();
-      if (onUpdate) onUpdate();
-      toast.success('Periodo académico creado exitosamente');
+      if (editing) {
+        const updated = await apiClient.callModule('mod-programas-estudio', `periodos/${editId}`, 'PUT', {
+          ...form,
+          fecha_fin_matricula_regular: form.fecha_fin_matricula_regular || null,
+          fecha_fin_matricula_extemporanea: form.fecha_fin_matricula_extemporanea || null,
+          updated_at: editing.period.updated_at ?? null,
+        });
+        if (updated?.id !== editId) throw new Error('No se pudo confirmar la actualización del periodo.');
+        setPeriods(prev => prev.map(p => p.id === editId ? updated : p)
+          .sort((a, b) => b.fecha_inicio.localeCompare(a.fecha_inicio)));
+        setEditing(null);
+        toast.success('Periodo académico actualizado');
+      } else {
+        await apiClient.callModule('mod-programas-estudio', 'periodos', 'POST', newPeriod);
+        setNewPeriod(EMPTY_PERIOD);
+        await fetchPeriods();
+        toast.success('Periodo académico creado exitosamente');
+      }
+      onUpdate?.();
     } catch (error) {
-      console.error('Error creating period:', error);
-      toast.error(error.message || 'Hubo un error al crear el periodo');
+      if (editing) {
+        setEditError(error.message || 'No se pudo actualizar el periodo.');
+        await fetchPeriods();
+      } else {
+        toast.error(error.message || 'Hubo un error al crear el periodo');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -77,7 +132,6 @@ export function PeriodManager({ onClose, onUpdate }) {
             Matrícula Abierta
           </span>
         );
-      case 'activo':
       case 'en_curso':
         return (
           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200/60">
@@ -153,7 +207,7 @@ export function PeriodManager({ onClose, onUpdate }) {
           </div>
           <button 
             onClick={onClose} 
-            disabled={deletingId !== null}
+            disabled={deletingId !== null || isSubmitting}
             className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 transition-colors disabled:opacity-50"
             aria-label="Cerrar"
           >
@@ -165,17 +219,23 @@ export function PeriodManager({ onClose, onUpdate }) {
           {/* Formulario Lateral */}
           <div className="w-full md:w-5/12 p-6 bg-slate-50/60 border-r border-slate-100 md:overflow-y-auto">
             <div className="flex items-center gap-1.5 mb-4">
-              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Crear Periodo</span>
+              <span className="text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                {editing ? `Editar periodo ${editing.period.codigo}` : 'Crear Periodo'}
+              </span>
             </div>
 
-            <form onSubmit={handleCreate} className="space-y-3.5">
+            <form onSubmit={handleSave} className="space-y-3.5">
               <div>
-                <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Código del Periodo</label>
+                <label htmlFor="period-code" className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Código del Periodo</label>
                 <input 
+                  id="period-code"
+                  ref={codeInput}
                   type="text" 
                   className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all font-mono uppercase" 
-                  value={newPeriod.codigo} 
-                  onChange={e => setNewPeriod({...newPeriod, codigo: e.target.value})}
+                  value={form.codigo}
+                  onChange={e => updateField('codigo', e.target.value)}
+                  maxLength={20}
+                  disabled={isSubmitting}
                   required 
                   placeholder="Ej. 2026-I"
                 />
@@ -183,76 +243,86 @@ export function PeriodManager({ onClose, onUpdate }) {
 
               <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Fecha Inicio</label>
+                  <label htmlFor="period-start" className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Fecha Inicio</label>
                   <input 
+                    id="period-start"
                     type="date" 
                     className="w-full px-2.5 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all" 
-                    value={newPeriod.fecha_inicio} 
-                    onChange={e => setNewPeriod({...newPeriod, fecha_inicio: e.target.value})}
+                    value={inputDate(form.fecha_inicio)}
+                    onChange={e => updateField('fecha_inicio', e.target.value)}
+                    disabled={isSubmitting}
                     required 
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Fecha Fin</label>
+                  <label htmlFor="period-end" className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Fecha Fin</label>
                   <input 
+                    id="period-end"
                     type="date" 
                     className="w-full px-2.5 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all" 
-                    value={newPeriod.fecha_fin} 
-                    onChange={e => setNewPeriod({...newPeriod, fecha_fin: e.target.value})}
+                    value={inputDate(form.fecha_fin)}
+                    onChange={e => updateField('fecha_fin', e.target.value)}
+                    disabled={isSubmitting}
                     required 
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Cierre Matrícula Regular</label>
+                <label htmlFor="period-regular" className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Cierre Matrícula Regular</label>
                 <input 
+                  id="period-regular"
                   type="date" 
                   className="w-full px-2.5 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all" 
-                  value={newPeriod.fecha_fin_matricula_regular} 
-                  onChange={e => setNewPeriod({...newPeriod, fecha_fin_matricula_regular: e.target.value})}
-                  required 
+                  value={inputDate(form.fecha_fin_matricula_regular)}
+                  onChange={e => updateField('fecha_fin_matricula_regular', e.target.value)}
+                  disabled={isSubmitting}
+                  required={!editing}
                 />
               </div>
 
               <div>
-                <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Cierre Matrícula Extemporánea</label>
+                <label htmlFor="period-late" className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Cierre Matrícula Extemporánea</label>
                 <input 
+                  id="period-late"
                   type="date" 
                   className="w-full px-2.5 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all" 
-                  value={newPeriod.fecha_fin_matricula_extemporanea} 
-                  onChange={e => setNewPeriod({...newPeriod, fecha_fin_matricula_extemporanea: e.target.value})}
-                  required 
+                  value={inputDate(form.fecha_fin_matricula_extemporanea)}
+                  onChange={e => updateField('fecha_fin_matricula_extemporanea', e.target.value)}
+                  disabled={isSubmitting}
+                  required={!editing}
                 />
               </div>
 
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Estado Inicial</label>
+              {!editing && <div>
+                <label htmlFor="period-initial-status" className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">Estado Inicial</label>
                 <select 
+                  id="period-initial-status"
                   className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all" 
                   value={newPeriod.estado} 
-                  onChange={e => setNewPeriod({...newPeriod, estado: e.target.value})}
+                  onChange={e => updateField('estado', e.target.value)}
+                  disabled={isSubmitting}
                 >
                   <option value="planificacion">Planificación</option>
                   <option value="matricula_abierta">Matrícula Abierta</option>
                   <option value="en_curso">En Curso</option>
                 </select>
-              </div>
+              </div>}
 
-              <button 
-                type="submit" 
-                className="w-full py-2.5 mt-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold shadow-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
-                disabled={busy}
-              >
-                {isSubmitting ? (
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                ) : (
-                  <>
-                    <Plus size={15} />
-                    <span>Registrar Periodo</span>
-                  </>
+              {editError && <p role="alert" className="rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-xs text-rose-800">{editError}</p>}
+              <div className="mt-2 flex flex-wrap gap-2">
+                {editing && (
+                  <button type="button" onClick={() => { setEditing(null); setEditError(''); }} disabled={isSubmitting}
+                    className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50">
+                    Cancelar
+                  </button>
                 )}
-              </button>
+                <button type="submit" disabled={busy || Boolean(editing && !editable)}
+                  className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-slate-900 px-3 py-2.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-slate-800 disabled:opacity-50">
+                  {isSubmitting ? <Loader2 size={15} className="animate-spin" /> : editing ? <Save size={15} /> : <Plus size={15} />}
+                  {isSubmitting ? 'Guardando…' : editing ? 'Guardar cambios' : 'Registrar Periodo'}
+                </button>
+              </div>
             </form>
             
             <div className="mt-5 p-3.5 rounded-xl bg-slate-100/70 border border-slate-200/80 text-[11px] text-slate-600 leading-relaxed">
@@ -287,7 +357,7 @@ export function PeriodManager({ onClose, onUpdate }) {
                 {periods.map(period => (
                   <div 
                     key={period.id} 
-                    className="p-3.5 rounded-xl border border-slate-200/80 hover:border-slate-300 hover:shadow-sm transition-all bg-white"
+                    className={`rounded-xl border p-3.5 transition-all ${editId === period.id ? 'border-sky-300 bg-sky-50/50' : 'border-slate-200/80 bg-white hover:border-slate-300 hover:shadow-sm'}`}
                   >
                     <div className="flex flex-wrap justify-between items-start gap-3">
                       <div className="flex items-center gap-3">
@@ -299,11 +369,11 @@ export function PeriodManager({ onClose, onUpdate }) {
                           <div className="text-[11px] text-slate-400 flex items-center gap-1.5 mt-0.5">
                             <Clock size={12} className="text-slate-400" />
                             <span>
-                              {period.fecha_inicio ? new Date(period.fecha_inicio).toLocaleDateString() : '-'}
+                              {displayDate(period.fecha_inicio)}
                             </span>
                             <span>→</span>
                             <span>
-                              {period.fecha_fin ? new Date(period.fecha_fin).toLocaleDateString() : '-'}
+                              {displayDate(period.fecha_fin)}
                             </span>
                           </div>
                         </div>
@@ -317,7 +387,7 @@ export function PeriodManager({ onClose, onUpdate }) {
                             className="text-[11px] font-semibold text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg px-2 py-0.5 cursor-pointer outline-none transition-colors"
                             aria-label={`Estado de ${period.codigo}`}
                             value={period.estado}
-                            disabled={busy}
+                            disabled={busy || Boolean(editing)}
                             onChange={(e) => handleStatusChange(period.id, e.target.value)}
                           >
                             {!['planificacion', 'matricula_abierta', 'en_curso', 'historico'].includes(period.estado) && (
@@ -328,11 +398,20 @@ export function PeriodManager({ onClose, onUpdate }) {
                             <option value="en_curso">En Curso</option>
                             <option value="historico">Histórico</option>
                           </select>
+                          {canEdit && canEditStatus(period) && (
+                            <button type="button" onClick={e => startEditing(period, e.currentTarget)}
+                              disabled={busy || Boolean(editing)}
+                              aria-label={`Editar periodo ${period.codigo}`}
+                              className="inline-flex min-h-8 items-center justify-center gap-1.5 rounded-lg border border-sky-200 bg-white px-2.5 py-1 text-xs font-semibold text-sky-800 transition-colors hover:bg-sky-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-600 disabled:opacity-50">
+                              <Pencil size={13} />
+                              Editar
+                            </button>
+                          )}
                           {canDelete && (
                             <button
                               type="button"
                               onClick={() => handleDelete(period)}
-                              disabled={busy}
+                              disabled={busy || Boolean(editing)}
                               aria-label={`Eliminar periodo ${period.codigo}`}
                               className="inline-flex min-h-8 items-center justify-center gap-1.5 rounded-lg border border-rose-200 bg-white px-2.5 py-1 text-xs font-semibold text-rose-700 transition-colors hover:bg-rose-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-600 disabled:opacity-50"
                             >

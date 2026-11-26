@@ -65,3 +65,70 @@ describe('Eliminar periodos del calendario', () => {
     expect(screen.queryByRole('button', { name: /Eliminar periodo/ })).toBeNull();
   });
 });
+
+describe('Editar periodos del calendario', () => {
+  it('ofrece la edición en los tres estados admitidos a Secretaría Académica', async () => {
+    user = { roles: ['secretaria_academica'] };
+    const estados = ['planificacion', 'matricula_abierta', 'en_curso', 'cerrado', 'historico', 'activo'];
+    apiClient.callModule.mockResolvedValue(estados.map((estado, i) => ({
+      ...periodo, id: 20 + i, codigo: `PER-${i}`, estado,
+    })));
+    montar();
+
+    await screen.findByRole('button', { name: 'Editar periodo PER-0' });
+    expect(screen.getAllByRole('button', { name: /Editar periodo/ }).map(b => b.getAttribute('aria-label')))
+      .toEqual(['Editar periodo PER-0', 'Editar periodo PER-1', 'Editar periodo PER-2']);
+  });
+
+  it('oculta la edición a un docente', async () => {
+    user = { roles: ['docente'] };
+    montar();
+    await screen.findByText('2029-I');
+    expect(screen.queryByRole('button', { name: /Editar periodo/ })).toBeNull();
+  });
+
+  it('precarga las fechas y conserva la hora de una fecha que no se cambió', async () => {
+    const onUpdate = vi.fn();
+    const existente = {
+      ...periodo, fecha_inicio: '2029-01-01T09:30:00', fecha_fin_matricula_regular: '2028-12-20T23:59:59',
+      updated_at: '2028-10-11T17:00:42.211040',
+    };
+    apiClient.callModule.mockResolvedValueOnce([existente])
+      .mockResolvedValueOnce({ ...existente, codigo: '2029-I-A', fecha_fin: '2029-07-05T00:00:00' });
+    montar(onUpdate);
+
+    fireEvent.change(await screen.findByLabelText('Código del Periodo'), { target: { value: 'Borrador' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Editar periodo 2029-I' }));
+    expect(screen.getByLabelText('Código del Periodo')).toHaveValue('2029-I');
+    expect(screen.getByLabelText('Fecha Inicio')).toHaveValue('2029-01-01');
+    expect(screen.getByLabelText('Cierre Matrícula Regular')).toHaveValue('2028-12-20');
+    expect(screen.queryByLabelText('Estado Inicial')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Código del Periodo'), { target: { value: '2029-I-A' } });
+    fireEvent.change(screen.getByLabelText('Fecha Fin'), { target: { value: '2029-07-05' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+
+    await screen.findByText('2029-I-A');
+    expect(apiClient.callModule).toHaveBeenCalledWith('mod-programas-estudio', 'periodos/20', 'PUT', {
+      codigo: '2029-I-A', fecha_inicio: '2029-01-01T09:30:00', fecha_fin: '2029-07-05',
+      fecha_fin_matricula_regular: '2028-12-20T23:59:59', fecha_fin_matricula_extemporanea: null,
+      updated_at: '2028-10-11T17:00:42.211040',
+    });
+    expect(screen.getByLabelText('Código del Periodo')).toHaveValue('Borrador');
+    expect(onUpdate).toHaveBeenCalledOnce();
+  });
+
+  it('refresca el estado si otra sesión cierra el periodo mientras se edita', async () => {
+    apiClient.callModule.mockResolvedValueOnce([periodo])
+      .mockRejectedValueOnce(new Error('El periodo fue cerrado.'))
+      .mockResolvedValueOnce([{ ...periodo, estado: 'historico' }]);
+    montar();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Editar periodo 2029-I' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Guardar cambios' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('El periodo fue cerrado.');
+    await screen.findByText('Histórico', { selector: 'span' });
+    expect(screen.getByRole('button', { name: 'Guardar cambios' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }));
+    expect(screen.queryByRole('button', { name: /Editar periodo/ })).toBeNull();
+  });
+});

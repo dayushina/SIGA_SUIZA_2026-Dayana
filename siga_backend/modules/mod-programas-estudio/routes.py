@@ -4,7 +4,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select, func, delete, text, table, column
 from typing import List, Optional
 from datetime import datetime, date
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from database import get_db, OutboxEvent
 from models import ProgramaEstudio, ProgramaConfiguracion, ProgramaModulo, ProgramaUnidad, ProgramaRequisito, PeriodoAcademico
 from shared.identity import (
@@ -39,6 +39,9 @@ class ProgramaResponse(ProgramaBase):
     model_config = ConfigDict(from_attributes=True)
 
 # Schemas Periodo Academico
+ESTADOS_PERIODO_EDITABLES = {"planificacion", "matricula_abierta", "en_curso"}
+
+
 class PeriodoBase(BaseModel):
     codigo: str
     fecha_inicio: datetime
@@ -49,6 +52,23 @@ class PeriodoBase(BaseModel):
 
 class PeriodoCreate(PeriodoBase):
     pass
+
+
+class PeriodoUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    codigo: str = Field(min_length=1, max_length=20)
+    fecha_inicio: datetime
+    fecha_fin: datetime
+    fecha_fin_matricula_regular: Optional[datetime]
+    fecha_fin_matricula_extemporanea: Optional[datetime]
+    updated_at: Optional[datetime]
+
+    @field_validator("fecha_inicio", "fecha_fin", "fecha_fin_matricula_regular", "fecha_fin_matricula_extemporanea")
+    @classmethod
+    def fecha_local(cls, value):
+        return value.replace(tzinfo=None) if value is not None else None
+
 
 class PeriodoResponse(PeriodoBase):
     id: int
@@ -138,6 +158,57 @@ async def obtener_periodos(response: Response, db: AsyncSession = Depends(get_db
     response.headers["Cache-Control"] = "no-store"
     result = await db.execute(select(PeriodoAcademico).order_by(PeriodoAcademico.fecha_inicio.desc()))
     return result.scalars().all()
+
+
+@router.put("/periodos/{periodo_id}", response_model=PeriodoResponse)
+async def actualizar_periodo(periodo_id: int, datos: PeriodoUpdate, request: Request, db: AsyncSession = Depends(get_db)):
+    actor = await get_identity(request, db)
+    if not es_superadmin(actor) and "secretaria_academica" not in actor.roles:
+        raise HTTPException(403, detail="Solo el superadministrador o Secretaría Académica pueden editar periodos.")
+
+    periodo = await db.get(PeriodoAcademico, periodo_id, with_for_update=True)
+    if periodo is None:
+        raise HTTPException(404, detail="El periodo académico ya no existe.")
+    if (periodo.estado or "").strip().lower() not in ESTADOS_PERIODO_EDITABLES:
+        raise HTTPException(409, detail="Solo se pueden editar periodos en planificación, matrícula abierta o en curso.")
+    if periodo.updated_at != datos.updated_at:
+        raise HTTPException(409, detail="El periodo cambió desde que lo abriste. Cancela y vuelve a abrir la edición para ver sus datos actuales.")
+    if datos.fecha_fin < datos.fecha_inicio:
+        raise HTTPException(422, detail="La fecha de fin debe ser igual o posterior a la fecha de inicio.")
+    if (datos.fecha_fin_matricula_regular is not None and datos.fecha_fin_matricula_extemporanea is not None
+            and datos.fecha_fin_matricula_extemporanea < datos.fecha_fin_matricula_regular):
+        raise HTTPException(422, detail="El cierre de matrícula extemporánea debe ser igual o posterior al cierre de matrícula regular.")
+
+    cambios = {
+        campo: valor for campo, valor in datos.model_dump(exclude={"updated_at"}).items()
+        if valor != getattr(periodo, campo)
+    }
+    if not cambios:
+        return periodo
+
+    for campo, valor in cambios.items():
+        setattr(periodo, campo, valor)
+    db.add(OutboxEvent(
+        event_type="periodo.actualizado",
+        payload={
+            "id": periodo_id,
+            "codigo": periodo.codigo,
+            "estado": periodo.estado,
+            "campos": list(cambios),
+            "actualizado_por": actor.user_id,
+            "metadata": {"request_id": request.headers.get("X-Request-ID", "unknown")},
+        },
+    ))
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if getattr(exc.orig, "sqlstate", None) != "23505":
+            raise
+        raise HTTPException(409, detail=f"Ya existe un periodo con el código {datos.codigo}.") from exc
+    await db.refresh(periodo)
+    return periodo
+
 
 @router.put("/periodos/{periodo_id}/estado", response_model=PeriodoResponse)
 async def actualizar_estado_periodo(periodo_id: int, estado: str, request: Request, db: AsyncSession = Depends(get_db)):

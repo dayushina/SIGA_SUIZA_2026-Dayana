@@ -60,6 +60,7 @@ class HTTPGateway:
             (module_name == "mod-admision" and ruta in {"admitidos", "resumen"})
             or (module_name == "mod-gestion-academica" and (
                 ruta == "estudiantes" or ruta.startswith("matriculas/unidad/")
+                or (ruta.startswith("estudiantes/") and ruta.endswith("/historial"))
             ))
             or (module_name == "mod-evaluacion" and ruta.startswith(("registros/unidad/", "actas/unidad/")))
             or (module_name == "mod-programas-estudio" and (

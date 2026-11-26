@@ -19,7 +19,7 @@ from io import BytesIO
 from typing import Dict, List, Optional
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1213,8 +1213,9 @@ async def resultado_final(
 # ---------------------------------------------------------------------------
 
 @router.get("/estudiantes/{estudiante_id}/historial")
-async def historial_estudiante(estudiante_id: int, db: AsyncSession = Depends(get_db)):
+async def historial_estudiante(estudiante_id: int, response: Response, db: AsyncSession = Depends(get_db)):
     """Historial académico: matrículas + estados institucionales."""
+    response.headers["Cache-Control"] = "no-store"
     mats = (await db.execute(
         select(Matricula)
         .options(selectinload(Matricula.detalles))
@@ -1235,7 +1236,7 @@ async def historial_estudiante(estudiante_id: int, db: AsyncSession = Depends(ge
                 "id": m.id, "periodo_id": m.periodo_id, "ciclo": m.ciclo,
                 "casuistica": m.casuistica, "estado_matricula": m.estado_matricula,
                 "unidades": [
-                    {"unidad_didactica_id": d.unidad_didactica_id,
+                    {"matricula_detalle_id": d.id, "unidad_didactica_id": d.unidad_didactica_id,
                      "creditos": d.creditos, "estado_curso": d.estado_curso}
                     for d in m.detalles
                 ],

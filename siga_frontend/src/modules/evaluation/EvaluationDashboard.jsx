@@ -117,12 +117,51 @@ function mapSaveError(error) {
   return msg || errorText;
 }
 
-const esMatriculaCalificable = student => student.estado_matricula === 'confirmada' && student.estado_curso !== 'retirado';
+const estadoMatriculaConocido = estado => typeof estado === 'string' && estado.trim().length > 0;
+const estadoCursoConocido = estado => typeof estado === 'string' || estado === null;
+const tieneEstadosDeMatricula = fila =>
+  estadoMatriculaConocido(fila.estado_matricula) && estadoCursoConocido(fila.estado_curso);
+const esMatriculaCalificable = student =>
+  tieneEstadosDeMatricula(student) && student.estado_matricula === 'confirmada' && student.estado_curso !== 'retirado';
 const notaNumerica = nota => nota === '' ? null : Number(nota);
+
+async function completarEstadosDeNomina(nomina, unidadId, periodoId, opciones) {
+  const historiales = new Map();
+  const estudiantes = [...new Set(nomina.filter(fila => !tieneEstadosDeMatricula(fila)).map(fila => fila.id))];
+
+  // Railway y Vercel se despliegan por separado. Solo las respuestas antiguas requieren el historial.
+  for (let i = 0; i < estudiantes.length && !opciones.signal.aborted; i += 6) {
+    await Promise.allSettled(estudiantes.slice(i, i + 6).map(async estudianteId => {
+      const historial = await apiClient.request(`/api/mod-gestion-academica/estudiantes/${estudianteId}/historial`, opciones);
+      if (historial?.estudiante_id === estudianteId && Array.isArray(historial.matriculas)) {
+        historiales.set(estudianteId, historial.matriculas);
+      }
+    }));
+  }
+
+  return nomina.map(fila => {
+    if (tieneEstadosDeMatricula(fila) || !historiales.has(fila.id)) return fila;
+    const candidatos = historiales.get(fila.id)
+      .filter(m => m.periodo_id === periodoId && Array.isArray(m.unidades))
+      .flatMap(m => m.unidades.filter(u => u.unidad_didactica_id === unidadId)
+        .map(u => ({ ...u, estado_matricula: m.estado_matricula })));
+    const exactos = candidatos.filter(c => c.matricula_detalle_id === fila.matricula_detalle_id);
+    const vigentes = candidatos.filter(c => !['anulada', 'anulada_por_reserva'].includes(c.estado_matricula));
+    const compatibles = candidatos.some(c => c.matricula_detalle_id != null) ? exactos : vigentes;
+    if (compatibles.length !== 1 || !tieneEstadosDeMatricula(compatibles[0])) return fila;
+
+    const [verificado] = compatibles;
+    // Un estado conocido de la nómina no puede quedar reemplazado por una lectura distinta.
+    if ((estadoMatriculaConocido(fila.estado_matricula) && fila.estado_matricula !== verificado.estado_matricula)
+      || (estadoCursoConocido(fila.estado_curso) && fila.estado_curso !== verificado.estado_curso)) return fila;
+    return { ...fila, estado_matricula: verificado.estado_matricula, estado_curso: verificado.estado_curso };
+  });
+}
 
 function motivoPromedioBloqueado(student) {
   if (student.estado_curso === 'retirado') return 'Retirado de la unidad';
   if (student.estado_matricula === 'pendiente') return 'Matrícula pendiente';
+  if (!tieneEstadosDeMatricula(student)) return 'Estado de matrícula no disponible';
   if (!esMatriculaCalificable(student)) return 'Matrícula sin confirmar';
   if (['cerrado', 'consolidado'].includes(student.estado_registro)) return 'Registro de nota cerrado';
   return '';
@@ -262,7 +301,9 @@ export function EvaluationDashboard() {
         if (!Array.isArray(enrolled) || !Array.isArray(grades)) throw new Error('Respuesta de la nómina incompleta.');
         const gradesByDetail = new Map(grades.map(g => [g.matricula_detalle_id, g]));
 
-        const combined = enrolled.map(est => {
+        const nomina = await completarEstadosDeNomina(enrolled, Number(selectedUnit), Number(selectedPeriod), opciones);
+        if (controller.signal.aborted) return;
+        const combined = nomina.map(est => {
           const gradeRecord = gradesByDetail.get(est.matricula_detalle_id);
           return {
             id: est.id,
@@ -299,6 +340,7 @@ export function EvaluationDashboard() {
   const actaStudents = students.filter(esMatriculaCalificable);
   const cambios = actaStudents.filter(s => !motivoPromedioBloqueado(s) && notaNumerica(s.nota_final) !== s.nota_guardada);
   const hayMatriculasPendientes = students.some(s => s.estado_matricula === 'pendiente');
+  const hayEstadosSinVerificar = students.some(s => !tieneEstadosDeMatricula(s));
   const puedeGuardar = Boolean(selectedUnit && selectedPeriod && !loading && !saving && !isReadOnly && cambios.length);
 
   const handleGradeChange = (student, value) => {
@@ -723,6 +765,11 @@ export function EvaluationDashboard() {
                 <p role="status" className="mx-6 mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
                   Solicita a Secretaría que cierre el proceso de las matrículas pendientes en
                   {' '}<strong>Proceso de Matrícula → Resultado final</strong>. Después vuelve a abrir la nómina.
+                </p>
+              )}
+              {hayEstadosSinVerificar && (
+                <p role="status" className="mx-6 mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                  El servicio de matrícula no devolvió un estado verificable para algunas filas. Vuelve a abrir la nómina para consultar el estado actual.
                 </p>
               )}
 
