@@ -1003,8 +1003,11 @@ async def eliminar_estudiante(estudiante_id: int, request: Request, motivo: str 
 @router.post("/matriculas/", response_model=MatriculaResponse, status_code=status.HTTP_201_CREATED)
 async def realizar_matricula(request: Request, data: MatriculaCreate, db: AsyncSession = Depends(get_db)):
     await validar_estudiante_secretaria(request, db, data.estudiante_id, data.programa_id, exigir_pago=True)
+    estudiante = await db.scalar(select(Estudiante).where(Estudiante.id == data.estudiante_id).with_for_update())
+    if estudiante is None:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+
     # Validar si ya está matriculado en este periodo
-    from sqlalchemy.future import select
     existing = await db.execute(
         select(Matricula).where(
             Matricula.estudiante_id == data.estudiante_id,
@@ -1022,7 +1025,8 @@ async def realizar_matricula(request: Request, data: MatriculaCreate, db: AsyncS
 
     # Separar detalles
     matricula_data = data.model_dump(exclude={"detalles"})
-    db_matricula = Matricula(**matricula_data)
+    estado = EstadoMatricula.CONFIRMADA if estudiante.pago_matricula else EstadoMatricula.PENDIENTE
+    db_matricula = Matricula(**matricula_data, estado_matricula=estado.value)
     db.add(db_matricula)
     await db.flush() # Para obtener db_matricula.id
 
@@ -1032,7 +1036,8 @@ async def realizar_matricula(request: Request, data: MatriculaCreate, db: AsyncS
     
     event_payload = {
         "event_id": str(uuid.uuid4()),
-        "event_type": "gestion_academica.matricula.confirmada",
+        "event_type": ("gestion_academica.matricula.confirmada" if estado == EstadoMatricula.CONFIRMADA
+                       else "gestion_academica.matricula.pendiente"),
         "source": "mod-gestion-academica",
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "version": "1.0.0",
@@ -1057,9 +1062,12 @@ async def obtener_matriculas_estudiante(estudiante_id: int, db: AsyncSession = D
     return result.scalars().all()
 
 @router.get("/matriculas/unidad/{unidad_id}/periodo/{periodo_id}")
-async def obtener_estudiantes_por_unidad(unidad_id: int, periodo_id: int, db: AsyncSession = Depends(get_db)):
+async def obtener_estudiantes_por_unidad(
+    unidad_id: int, periodo_id: int, response: Response, db: AsyncSession = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
     query = (
-        select(Estudiante, MatriculaDetalle.id.label("matricula_detalle_id"))
+        select(Estudiante, MatriculaDetalle.id, Matricula.estado_matricula, MatriculaDetalle.estado_curso)
         .join(Matricula, Matricula.estudiante_id == Estudiante.id)
         .join(MatriculaDetalle, MatriculaDetalle.matricula_id == Matricula.id)
         .where(Matricula.periodo_id == periodo_id)
@@ -1070,15 +1078,17 @@ async def obtener_estudiantes_por_unidad(unidad_id: int, periodo_id: int, db: As
     rows = result.all()
     
     response = []
-    for est, det_id in rows:
+    for est, det_id, estado_matricula, estado_curso in rows:
         est_dict = EstudianteResponse.model_validate(est).model_dump()
-        est_dict["matricula_detalle_id"] = det_id
+        est_dict.update(matricula_detalle_id=det_id, estado_matricula=estado_matricula, estado_curso=estado_curso)
         response.append(est_dict)
         
     return response
 
 @router.post("/matriculas/unidad/{unidad_id}/periodo/{periodo_id}/sincronizar")
-async def sincronizar_estudiantes_seccion(unidad_id: int, periodo_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+async def sincronizar_estudiantes_seccion(
+    unidad_id: int, periodo_id: int, request: Request, response: Response, db: AsyncSession = Depends(get_db),
+):
     """
     Sincroniza y matricula a los estudiantes activos del programa y ciclo que corresponda a esta unidad didáctica
     para que el docente disponga inmediatamente de la nómina completa en su registro de calificaciones.
@@ -1144,7 +1154,7 @@ async def sincronizar_estudiantes_seccion(unidad_id: int, periodo_id: int, reque
             db.add(db_det)
             
     await db.commit()
-    return await obtener_estudiantes_por_unidad(unidad_id, periodo_id, db)
+    return await obtener_estudiantes_por_unidad(unidad_id, periodo_id, response, db)
 
 _MAX_LOTE_MATRICULAS = 5000
 _MATRICULA_AUSENTE = "Matrícula no encontrada"

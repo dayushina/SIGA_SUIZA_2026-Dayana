@@ -262,6 +262,7 @@ export function EnrollmentProcess({ initialStudent, onCancel }) {
     try {
       const res = await apiClient.callModule('mod-gestion-academica', `matriculas/${matricula.id}/consolidar`, 'POST');
       setConsolidacion(res);
+      setMatricula(prev => ({ ...prev, estado_matricula: 'confirmada', consolidada: true }));
     } catch (e) {
       console.error(e);
       toast.error(`No se pudo consolidar: ${e.message}`);
@@ -547,7 +548,11 @@ export function EnrollmentProcess({ initialStudent, onCancel }) {
                   ✅
                 </div>
                 <h3 className="font-extrabold text-3xl text-slate-800 mb-2">¡Matrícula Registrada!</h3>
-                <p className="text-slate-500 text-center max-w-lg">La matrícula quedó <b>confirmada</b>. Emita la boleta con su código QR y cierre el proceso.</p>
+                <p className="text-slate-500 text-center max-w-lg">
+                  {matricula?.estado_matricula === 'confirmada'
+                    ? 'La matrícula está confirmada. El cierre genera el registro académico y la boleta con QR.'
+                    : 'La matrícula está pendiente. Cierra el proceso para confirmarla y habilitar el registro de notas.'}
+                </p>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

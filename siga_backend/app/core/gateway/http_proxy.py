@@ -58,7 +58,10 @@ class HTTPGateway:
         ruta = path.strip("/")
         requiere_datos_actuales = (
             (module_name == "mod-admision" and ruta in {"admitidos", "resumen"})
-            or (module_name == "mod-gestion-academica" and ruta == "estudiantes")
+            or (module_name == "mod-gestion-academica" and (
+                ruta == "estudiantes" or ruta.startswith("matriculas/unidad/")
+            ))
+            or (module_name == "mod-evaluacion" and ruta.startswith(("registros/unidad/", "actas/unidad/")))
             or (module_name == "mod-programas-estudio" and (
                 ruta.endswith("/docentes-disponibles")
                 or ruta == "periodos"

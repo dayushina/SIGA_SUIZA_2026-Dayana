@@ -8,6 +8,27 @@ from tests.helpers.module_loader import load_module_component
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pagada,estado", [(True, "confirmada"), (False, "pendiente")])
+async def test_alta_manual_persiste_el_estado_segun_pago(db_session, fixture_estudiante, fixture_periodo, pagada, estado):
+    await db_session.execute(text("UPDATE estudiantes SET pago_matricula = :pago WHERE id=100"), {"pago": pagada})
+    await db_session.commit()
+    app = FastAPI()
+    app.include_router(load_module_component("mod-gestion-academica", "routes").router)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as cliente:
+        r = await cliente.post("/matriculas/", headers=auth_headers(1), json={
+            "estudiante_id": 100, "programa_id": 1, "periodo_id": 1,
+            "detalles": [{"unidad_didactica_id": 101, "creditos": 4}],
+        })
+    assert r.status_code == 201, r.text
+    assert r.json()["estado_matricula"] == estado
+    assert await db_session.scalar(text("SELECT estado_matricula FROM matriculas WHERE id=:id"), {"id": r.json()["id"]}) == estado
+    eventos = (await db_session.execute(text(
+        "SELECT event_type FROM outbox_events WHERE event_type LIKE 'gestion_academica.matricula.%'"
+    ))).scalars().all()
+    assert eventos == [f"gestion_academica.matricula.{estado}"]
+
+
+@pytest.mark.asyncio
 async def test_asignacion_obligatoria_y_padron_acotado(db_session, fixture_programa_y_unidad):
     await db_session.execute(text("INSERT INTO core_roles (id, name, created_at) VALUES (90, 'secretaria_programa', now())"))
     await db_session.execute(text("""

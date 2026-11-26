@@ -38,19 +38,33 @@ def _es_matricula_calificable(estado_matricula: str, estado_curso: Optional[str]
     return estado_matricula == "confirmada" and (estado_curso is None or estado_curso != "retirado")
 
 
+def _exigir_matricula_calificable(estado_matricula: str, estado_curso: Optional[str]) -> None:
+    if _es_matricula_calificable(estado_matricula, estado_curso):
+        return
+    if estado_matricula == "pendiente":
+        detalle = "La matrícula está pendiente. Solicita a Secretaría que cierre el proceso en Resultado final."
+    elif estado_matricula in {"anulada", "anulada_por_reserva"}:
+        detalle = "La matrícula está anulada. No se permite modificar calificaciones."
+    elif estado_curso == "retirado":
+        detalle = "El estudiante se encuentra en estado 'retirado' en esta unidad didáctica."
+    else:
+        detalle = f"La matrícula se encuentra en estado '{estado_matricula}'. Solo se pueden calificar matrículas confirmadas."
+    raise HTTPException(409, detail=detalle)
+
+
 async def _bloquear_matriculas_para_notas(db: AsyncSession, detalle_ids: set[int]) -> None:
     if not detalle_ids:
         return
-    estados = await db.scalars(text("""
-        SELECT m.estado_matricula FROM matriculas m
-        WHERE m.id IN (
-            SELECT md.matricula_id FROM matricula_detalles md
-            WHERE md.id = ANY(CAST(:ids AS integer[]))
-        )
-        ORDER BY m.id FOR SHARE OF m
-    """), {"ids": list(detalle_ids)})
-    if any(estado in {"anulada", "anulada_por_reserva"} for estado in estados):
-        raise HTTPException(409, detail="La matrícula está anulada. No se permite modificar calificaciones.")
+    estados = (await db.execute(text("""
+        SELECT md.id, m.estado_matricula, md.estado_curso
+        FROM matricula_detalles md JOIN matriculas m ON m.id = md.matricula_id
+        WHERE md.id = ANY(CAST(:ids AS integer[]))
+        ORDER BY m.id, md.id FOR SHARE OF m, md
+    """), {"ids": list(detalle_ids)})).all()
+    if len(estados) != len(detalle_ids):
+        raise HTTPException(404, detail="No se encontró un detalle de matrícula vinculado a las notas.")
+    for _, estado_matricula, estado_curso in estados:
+        _exigir_matricula_calificable(estado_matricula, estado_curso)
 
 def _calcular_promedio(c1, c2, c3):
     notas = [n for n in (c1, c2, c3) if n is not None]
@@ -232,7 +246,7 @@ async def crear_registro(data: RegistroEvaluacionCreate, request: Request, db: A
               AND md.unidad_didactica_id = :u_id
               AND m.estudiante_id = :est_id
               AND m.periodo_id = :per_id
-            FOR SHARE OF m
+            FOR SHARE OF m, md
         """),
         {
             "det_id": data.matricula_detalle_id,
@@ -248,23 +262,7 @@ async def crear_registro(data: RegistroEvaluacionCreate, request: Request, db: A
             detail="No se encontró una matrícula activa válida que corresponda al estudiante, unidad didáctica y periodo indicados."
         )
 
-    estado_mat = mat_row[1]
-    estado_cur = mat_row[2]
-    if not _es_matricula_calificable(estado_mat, estado_cur):
-        if estado_mat == "pendiente":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="La matrícula del estudiante se encuentra en estado 'pendiente'. Solo se permite calificar matrículas en estado 'confirmada'."
-            )
-        if estado_cur == "retirado":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="El estudiante se encuentra en estado 'retirado' en esta unidad didáctica."
-            )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"La matrícula se encuentra en estado '{estado_mat}'. No se permite calificar."
-        )
+    _exigir_matricula_calificable(mat_row[1], mat_row[2])
 
     # 3. Validar no duplicidad
     result = await db.execute(select(RegistroEvaluacion).where(RegistroEvaluacion.matricula_detalle_id == data.matricula_detalle_id))

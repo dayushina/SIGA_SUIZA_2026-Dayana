@@ -97,6 +97,9 @@ function mapSaveError(error) {
   if (status === 403 || /403/i.test(msg) || /permiso|no asignado/i.test(msg)) {
     return "No tiene permiso sobre esta unidad";
   }
+  if (/matr[ií]cula.*pendiente/i.test(msg)) {
+    return 'La matrícula está pendiente. Solicita a Secretaría que cierre el proceso en Resultado final.';
+  }
   if (status === 409 || /409/i.test(msg) || /acta.*cerrada|plazo.*venci/i.test(msg)) {
     if (detail) return detail;
     const cleanMsg = msg.replace(/^HTTP error!\s*status:\s*409\s*-?\s*/i, '').trim();
@@ -111,7 +114,18 @@ function mapSaveError(error) {
   if (detail) {
     return detail;
   }
-  return errorText;
+  return msg || errorText;
+}
+
+const esMatriculaCalificable = student => student.estado_matricula === 'confirmada' && student.estado_curso !== 'retirado';
+const notaNumerica = nota => nota === '' ? null : Number(nota);
+
+function motivoPromedioBloqueado(student) {
+  if (student.estado_curso === 'retirado') return 'Retirado de la unidad';
+  if (student.estado_matricula === 'pendiente') return 'Matrícula pendiente';
+  if (!esMatriculaCalificable(student)) return 'Matrícula sin confirmar';
+  if (['cerrado', 'consolidado'].includes(student.estado_registro)) return 'Registro de nota cerrado';
+  return '';
 }
 
 function useSafeToast() {
@@ -219,21 +233,25 @@ export function EvaluationDashboard() {
     setSaveSuccess(null);
     setSaveError(null);
     setGradeError(null);
+    setStudents([]);
+    setActaStatus(null);
 
     if (!selectedUnit || !selectedPeriod) {
-      setStudents([]);
-      setActaStatus(null);
+      setLoading(false);
       return;
     }
 
+    const controller = new AbortController();
+    const opciones = { cache: 'no-store', signal: controller.signal };
     const fetchStudentsAndGrades = async () => {
       setLoading(true);
       try {
         const [enrolled, grades, actaInfo] = await Promise.all([
-          apiClient.request(`/api/mod-gestion-academica/matriculas/unidad/${selectedUnit}/periodo/${selectedPeriod}`).catch(() => []),
-          apiClient.request(`/api/mod-evaluacion/registros/unidad/${selectedUnit}/periodo/${selectedPeriod}`).catch(() => []),
-          apiClient.request(`/api/mod-evaluacion/actas/unidad/${selectedUnit}/periodo/${selectedPeriod}`).catch(() => null)
+          apiClient.request(`/api/mod-gestion-academica/matriculas/unidad/${selectedUnit}/periodo/${selectedPeriod}`, opciones),
+          apiClient.request(`/api/mod-evaluacion/registros/unidad/${selectedUnit}/periodo/${selectedPeriod}`, opciones),
+          apiClient.request(`/api/mod-evaluacion/actas/unidad/${selectedUnit}/periodo/${selectedPeriod}`, opciones),
         ]);
+        if (controller.signal.aborted) return;
 
         if (actaInfo && typeof actaInfo === 'object' && !Array.isArray(actaInfo) && 'tiene_carga' in actaInfo) {
           setActaStatus(actaInfo);
@@ -241,37 +259,50 @@ export function EvaluationDashboard() {
           setActaStatus(null);
         }
 
-        const enrolledList = Array.isArray(enrolled) ? enrolled : [];
-        const gradesList = Array.isArray(grades) ? grades : [];
+        if (!Array.isArray(enrolled) || !Array.isArray(grades)) throw new Error('Respuesta de la nómina incompleta.');
+        const gradesByDetail = new Map(grades.map(g => [g.matricula_detalle_id, g]));
 
-        const combined = enrolledList.map(est => {
-          const gradeRecord = gradesList.find(g => g.matricula_detalle_id === est.matricula_detalle_id);
+        const combined = enrolled.map(est => {
+          const gradeRecord = gradesByDetail.get(est.matricula_detalle_id);
           return {
             id: est.id,
             matricula_detalle_id: est.matricula_detalle_id,
+            estado_matricula: est.estado_matricula,
+            estado_curso: est.estado_curso,
             name: `${est.apellidos}, ${est.nombres}`,
-            registro_id: gradeRecord ? gradeRecord.id : null,
-            nota_final: gradeRecord?.nota_final ?? ''
+            registro_id: gradeRecord?.id ?? null,
+            estado_registro: gradeRecord?.estado,
+            nota_final: gradeRecord?.nota_final ?? '',
+            nota_guardada: gradeRecord?.nota_final ?? null,
           };
         });
 
         combined.sort((a, b) => a.name.localeCompare(b.name));
         setStudents(combined);
       } catch (e) {
-        console.error('Error fetching students and grades', e);
+        if (!controller.signal.aborted) {
+          setSaveError(`No se pudo cargar la nómina. ${e.message || ''}`.trim());
+        }
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
       }
-      setLoading(false);
     };
 
     fetchStudentsAndGrades();
+    return () => controller.abort();
   }, [selectedUnit, selectedPeriod]);
 
   const isReadOnly = Boolean(
     actaStatus && (!actaStatus.tiene_carga || !actaStatus.editable)
   );
 
-  const handleGradeChange = (studentId, criteria, value) => {
-    if (isReadOnly) return;
+  const actaStudents = students.filter(esMatriculaCalificable);
+  const cambios = actaStudents.filter(s => !motivoPromedioBloqueado(s) && notaNumerica(s.nota_final) !== s.nota_guardada);
+  const hayMatriculasPendientes = students.some(s => s.estado_matricula === 'pendiente');
+  const puedeGuardar = Boolean(selectedUnit && selectedPeriod && !loading && !saving && !isReadOnly && cambios.length);
+
+  const handleGradeChange = (student, value) => {
+    if (isReadOnly || saving || motivoPromedioBloqueado(student)) return;
 
     if (value !== '' && !/^\d+$/.test(value)) {
       setGradeError('La nota debe ser un número entero entre 0 y 20');
@@ -287,18 +318,18 @@ export function EvaluationDashboard() {
     setGradeError(null);
     setSaveError(null);
     setStudents(prev => prev.map(s => {
-      if (s.id === studentId) {
-        return { ...s, [criteria]: value };
+      if (s.matricula_detalle_id === student.matricula_detalle_id) {
+        return { ...s, nota_final: value };
       }
       return s;
     }));
   };
 
   const handleSaveGrades = async () => {
-    if (!selectedUnit || !selectedPeriod || students.length === 0 || isReadOnly) return;
+    if (!puedeGuardar) return;
 
     // Validación cliente de todas las notas
-    const hasInvalidGrade = students.some(s => {
+    const hasInvalidGrade = cambios.some(s => {
       if (s.nota_final === '' || s.nota_final === null || s.nota_final === undefined) return false;
       const n = Number(s.nota_final);
       return isNaN(n) || !Number.isInteger(n) || n < 0 || n > 20;
@@ -313,18 +344,17 @@ export function EvaluationDashboard() {
     setSaveError(null);
     setSaveSuccess(null);
     try {
-      const promises = students.map(student => {
+      const results = await Promise.allSettled(cambios.map(async student => {
         const payload = {
-          nota_final: student.nota_final !== '' && student.nota_final !== null ? parseInt(student.nota_final, 10) : null
+          nota_final: notaNumerica(student.nota_final)
         };
 
-        if (student.registro_id) {
-          return apiClient.request(`/api/mod-evaluacion/registros/${student.registro_id}`, {
+        const data = student.registro_id
+          ? await apiClient.request(`/api/mod-evaluacion/registros/${student.registro_id}`, {
             method: 'PUT',
             body: JSON.stringify(payload)
-          }).then(data => ({ status: 'ok', data }));
-        } else {
-          return apiClient.request(`/api/mod-evaluacion/registros`, {
+          })
+          : await apiClient.request('/api/mod-evaluacion/registros', {
             method: 'POST',
             body: JSON.stringify({
               ...payload,
@@ -333,27 +363,30 @@ export function EvaluationDashboard() {
               unidad_didactica_id: parseInt(selectedUnit, 10),
               periodo_id: parseInt(selectedPeriod, 10)
             })
-          }).then(data => ({ status: 'ok', data }));
+          });
+        if (!data?.id || data.matricula_detalle_id !== student.matricula_detalle_id) {
+          throw new Error('No se pudo verificar el registro del promedio.');
         }
-      });
+        return data;
+      }));
 
-      const results = await Promise.all(promises);
-
-      const newStudents = [...students];
-      for (let i = 0; i < results.length; i++) {
-        const res = results[i];
-        if (res.status === 'ok' && !newStudents[i].registro_id) {
-          newStudents[i].registro_id = res.data.id;
-        }
+      const guardados = new Map(results.filter(r => r.status === 'fulfilled')
+        .map(r => [r.value.matricula_detalle_id, r.value]));
+      if (guardados.size) {
+        setStudents(prev => prev.map(s => {
+          const nota = guardados.get(s.matricula_detalle_id);
+          return nota ? { ...s, registro_id: nota.id, estado_registro: nota.estado,
+            nota_final: nota.nota_final ?? '', nota_guardada: nota.nota_final ?? null } : s;
+        }));
       }
-
-      setStudents(newStudents);
-      setSaveSuccess('Calificaciones guardadas exitosamente');
-      toast.success("¡Calificaciones guardadas exitosamente en el sistema SIGA!");
-    } catch (e) {
-      console.error('Error saving grades', e);
-      setSaveError(mapSaveError(e));
-      toast.error("Ocurrió un error al guardar las calificaciones: " + (e.message || "Error de conexión"));
+      const fallidos = results.filter(r => r.status === 'rejected');
+      if (fallidos.length) {
+        const errores = [...new Set(fallidos.map(r => mapSaveError(r.reason)))].join(' ');
+        setSaveError(guardados.size ? `Se guardaron ${guardados.size} de ${cambios.length} promedios. ${errores}` : errores);
+      } else {
+        setSaveSuccess('Calificaciones guardadas exitosamente');
+        toast.success('Calificaciones guardadas en SIGA.');
+      }
     } finally {
       setSaving(false);
     }
@@ -379,7 +412,7 @@ export function EvaluationDashboard() {
     return words[n];
   };
 
-  const gradedStudents = students.filter(s => s.nota_final !== '' && !isNaN(Number(s.nota_final)));
+  const gradedStudents = actaStudents.filter(s => s.nota_final !== '' && !isNaN(Number(s.nota_final)));
   const aprobadosCount = gradedStudents.filter(s => Number(s.nota_final) >= 13).length;
   const desaprobadosCount = gradedStudents.filter(s => Number(s.nota_final) < 13).length;
   const porcentajeAprobacion = gradedStudents.length > 0 
@@ -416,9 +449,9 @@ export function EvaluationDashboard() {
           <button 
             type="button"
             onClick={() => setShowActaModal(true)}
-            disabled={!selectedUnit || students.length === 0}
+            disabled={!selectedUnit || actaStudents.length === 0}
             className={`inline-flex items-center gap-1.5 py-2 px-3.5 rounded-xl font-medium text-xs border transition-all ${
-              !selectedUnit || students.length === 0 
+              !selectedUnit || actaStudents.length === 0
                 ? 'border-slate-200 text-slate-300 bg-slate-50 cursor-not-allowed' 
                 : 'border-slate-200/90 text-slate-700 bg-white hover:bg-slate-50 shadow-sm cursor-pointer'
             }`}
@@ -429,10 +462,12 @@ export function EvaluationDashboard() {
 
           <button 
             onClick={handleSaveGrades}
-            disabled={saving || !selectedUnit || students.length === 0 || isReadOnly}
-            title={isReadOnly ? (actaStatus?.motivo_bloqueo || 'Calificaciones en solo lectura') : 'Guardar Promedios'}
+            disabled={!puedeGuardar}
+            title={isReadOnly ? (actaStatus?.motivo_bloqueo || 'Calificaciones en solo lectura')
+              : hayMatriculasPendientes && actaStudents.length === 0 ? 'Requiere una matrícula confirmada'
+                : 'Guardar Promedios'}
             className={`inline-flex items-center gap-1.5 py-2 px-4 rounded-xl font-medium text-xs shadow-sm transition-all ${
-              saving || !selectedUnit || students.length === 0 || isReadOnly
+              !puedeGuardar
                 ? 'bg-slate-200 text-slate-400 cursor-not-allowed' 
                 : 'bg-slate-900 hover:bg-slate-800 text-white cursor-pointer'
             }`}
@@ -493,6 +528,7 @@ export function EvaluationDashboard() {
                     <select
                       className="bg-transparent font-bold text-slate-900 border-none p-0 focus:ring-0 cursor-pointer text-xs"
                       value={selectedProgram}
+                      disabled={saving}
                       onChange={(e) => setSelectedProgram(e.target.value)}
                     >
                       {programs.map(p => (
@@ -517,6 +553,7 @@ export function EvaluationDashboard() {
                     <select
                       className="bg-transparent font-bold text-slate-900 border-none p-0 focus:ring-0 cursor-pointer text-xs font-mono"
                       value={selectedPeriod}
+                      disabled={saving}
                       onChange={(e) => setSelectedPeriod(e.target.value)}
                     >
                       {periods.map(p => (
@@ -543,7 +580,7 @@ export function EvaluationDashboard() {
                   className="w-full px-3.5 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all appearance-none cursor-pointer"
                   value={selectedUnit}
                   onChange={(e) => setSelectedUnit(e.target.value)}
-                  disabled={!selectedProgram || !selectedPeriod || malla.length === 0}
+                  disabled={saving || !selectedProgram || !selectedPeriod || malla.length === 0}
                 >
                   <option value="" className="text-slate-400">-- Seleccione el curso a evaluar --</option>
                   {malla.map(modulo => {
@@ -682,6 +719,13 @@ export function EvaluationDashboard() {
                 </div>
               )}
 
+              {hayMatriculasPendientes && (
+                <p role="status" className="mx-6 mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                  Solicita a Secretaría que cierre el proceso de las matrículas pendientes en
+                  {' '}<strong>Proceso de Matrícula → Resultado final</strong>. Después vuelve a abrir la nómina.
+                </p>
+              )}
+
               {/* Barra superior de estado */}
               <div className="px-6 py-4 border-b border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
                 <div className="flex items-center gap-3">
@@ -729,21 +773,25 @@ export function EvaluationDashboard() {
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {students.map((student, idx) => {
+                        const motivo = motivoPromedioBloqueado(student);
+                        const bloqueado = isReadOnly || saving || Boolean(motivo);
                         const numGrade = parseInt(student.nota_final, 10);
                         const hasGrade = student.nota_final !== '' && !isNaN(numGrade);
                         const isPassed = hasGrade && numGrade >= 13;
 
                         return (
-                          <tr key={student.id} className="hover:bg-slate-50/60 transition-colors">
+                          <tr key={student.matricula_detalle_id} className="hover:bg-slate-50/60 transition-colors">
                             <td className="py-3 px-4 text-center font-mono text-slate-400">{idx + 1}</td>
                             <td className="py-3 px-4 font-medium text-slate-800 text-xs">{student.name}</td>
                             <td className="py-2 px-4 text-center">
                               <input 
                                 type="text" 
-                                disabled={isReadOnly}
-                                readOnly={isReadOnly}
+                                disabled={bloqueado}
+                                readOnly={bloqueado}
+                                aria-label={`Promedio final de ${student.name}`}
+                                title={motivo || undefined}
                                 className={`w-16 mx-auto text-center py-1.5 px-2 border rounded-xl outline-none font-bold text-sm transition-all ${
-                                  isReadOnly
+                                  bloqueado
                                     ? 'border-slate-200 bg-slate-100 text-slate-500 cursor-not-allowed'
                                     : student.nota_final === '' 
                                       ? 'border-slate-200 bg-white text-slate-800 focus:border-slate-900 focus:ring-1 focus:ring-slate-900' 
@@ -752,13 +800,15 @@ export function EvaluationDashboard() {
                                         : 'border-rose-300 text-rose-700 bg-rose-50/50 focus:border-rose-500 focus:bg-white'
                                 }`}
                                 value={student.nota_final}
-                                onChange={(e) => handleGradeChange(student.id, 'nota_final', e.target.value)}
+                                onChange={(e) => handleGradeChange(student, e.target.value)}
                                 maxLength={2}
                                 placeholder="--"
                               />
                             </td>
                             <td className="py-3 px-4 text-center">
-                              {!hasGrade ? (
+                              {motivo ? (
+                                <span className="text-[11px] font-semibold text-amber-800">{motivo}</span>
+                              ) : !hasGrade ? (
                                 <span className="text-[11px] text-slate-400 font-medium">Pendiente</span>
                               ) : isPassed ? (
                                 <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200/60 px-2 py-0.5 rounded-full">
@@ -875,7 +925,7 @@ export function EvaluationDashboard() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-300">
-                  {students.map((st, idx) => {
+                  {actaStudents.map((st, idx) => {
                     const gradeNum = parseInt(st.nota_final);
                     const hasGrade = st.nota_final !== '' && !isNaN(gradeNum);
                     const isPassed = hasGrade && gradeNum >= 13;
@@ -908,7 +958,7 @@ export function EvaluationDashboard() {
               <div className="grid grid-cols-4 gap-3 p-3 bg-slate-50 border border-slate-300 rounded-xl mb-12 text-center text-xs">
                 <div>
                   <span className="font-bold text-slate-400 uppercase text-[9px] block">Matriculados</span>
-                  <span className="font-black text-sm text-slate-800">{students.length}</span>
+                  <span className="font-black text-sm text-slate-800">{actaStudents.length}</span>
                 </div>
                 <div>
                   <span className="font-bold text-slate-400 uppercase text-[9px] block">Aprobados</span>

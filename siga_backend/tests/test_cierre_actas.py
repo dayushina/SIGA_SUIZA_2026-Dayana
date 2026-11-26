@@ -403,7 +403,9 @@ async def test_get_actas_devuelve_editable_y_motivo_bloqueo(client_evaluacion, a
 # 11. MATRÍCULA PENDIENTE ES RECHAZADA EN POST /registros (409)
 # ==============================================================================
 @pytest.mark.asyncio
-async def test_matricula_pendiente_rechazada_en_post_registros(client_evaluacion, db_session: AsyncSession, fix_carga_acta):
+async def test_nomina_y_guardado_reflejan_confirmacion_de_matricula(
+    client_evaluacion, db_session: AsyncSession, fix_carga_acta, monkeypatch,
+):
     u_id = fix_carga_acta["unidad_id"]
     p_id = fix_carga_acta["periodo_id"]
 
@@ -429,7 +431,40 @@ async def test_matricula_pendiente_rechazada_en_post_registros(client_evaluacion
     }
     resp = await client_evaluacion.post("/registros", json=payload)
     assert resp.status_code == 409
-    assert "pendiente" in resp.json()["detail"].lower()
+    assert "Resultado final" in resp.json()["detail"]
+    resp = await client_evaluacion.post("/registros/batch", json=[payload])
+    assert resp.status_code == 409
+    assert await db_session.scalar(text(
+        "SELECT count(*) FROM evaluacion_registros WHERE matricula_detalle_id = 8881"
+    )) == 0
+
+    academica = FastAPI()
+    academica.include_router(load_module_component("mod-gestion-academica", "routes").router)
+    matriculas = load_module_component("mod-gestion-academica", "matricula_routes")
+    academica.include_router(matriculas.router)
+
+    async def carga_de_prueba(*_):
+        return []
+
+    monkeypatch.setattr(matriculas, "fetch_cargaLectiva", carga_de_prueba)
+    monkeypatch.setattr(matriculas, "fetch_malla", carga_de_prueba)
+    ruta_nomina = f"/matriculas/unidad/{u_id}/periodo/{p_id}"
+    async with AsyncClient(transport=ASGITransport(app=academica), base_url="http://test-acad",
+                           headers=auth_headers(1)) as a:
+        nomina = await a.get(ruta_nomina)
+        assert nomina.status_code == 200, nomina.text
+        assert nomina.headers["cache-control"] == "no-store"
+        assert {e["matricula_detalle_id"]: e["estado_matricula"] for e in nomina.json()}[8881] == "pendiente"
+        resultado = await a.post("/matriculas/888/consolidar")
+        assert resultado.status_code == 200, resultado.text
+        assert {e["matricula_detalle_id"]: e["estado_matricula"] for e in (await a.get(ruta_nomina)).json()}[8881] == "confirmada"
+
+    r = await client_evaluacion.post("/registros", json={**payload, "nota_final": 20})
+    assert r.status_code == 201 and r.json()["nota_final"] == 20, r.text
+    await db_session.execute(text("UPDATE matricula_detalles SET estado_curso='retirado' WHERE id=8881"))
+    await db_session.commit()
+    r = await client_evaluacion.put(f"/registros/{r.json()['id']}", json={"nota_final": 18})
+    assert r.status_code == 409 and "retirado" in r.json()["detail"]
 
 # ==============================================================================
 # 12. MATRÍCULAS PENDIENTES EN /cerrar NO BLOQUEAN Y DEVUELVEN ADVERTENCIA
